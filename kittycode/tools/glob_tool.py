@@ -7,7 +7,9 @@ from .base import Tool
 
 class GlobTool(Tool):
     name = "glob"
-    description = "Find files matching a glob pattern. Supports ** for recursive matching."
+    description = """
+    Find files matching a glob pattern. Supports ** for recursive matching.
+    """
     parameters = {
         "type": "object",
         "properties": {

@@ -34,6 +34,10 @@ class Agent:
         self.llm = llm
         self.tools = list(tools) if tools is not None else create_tool_instances()
         self.messages: list[dict] = []
+        self.todos: list[dict] = []
+        self.brief_messages: list[dict] = []
+        self.ask_user_handler = None
+        self.on_brief_message = None
         self.context = ContextManager(max_tokens=max_context_tokens)
         self.max_rounds = max_rounds
         self.skills = []
@@ -41,8 +45,7 @@ class Agent:
         self.refresh_skills(force_reload=True)
 
         for tool in self.tools:
-            if isinstance(tool, AgentTool):
-                tool._parent_agent = self
+            tool.bind_agent(self)
 
     def _full_messages(self) -> list[dict]:
         self.refresh_skills()
@@ -59,6 +62,10 @@ class Agent:
             max_rounds=self.max_rounds,
         )
         worker.messages = copy.deepcopy(self.messages)
+        worker.todos = copy.deepcopy(self.todos)
+        worker.brief_messages = copy.deepcopy(self.brief_messages)
+        worker.ask_user_handler = self.ask_user_handler
+        worker.on_brief_message = self.on_brief_message
         worker.skills = list(self.skills)
         worker._system = self._system
         return worker

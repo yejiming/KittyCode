@@ -1,11 +1,17 @@
 """Tool registry."""
 
 from .agent import AgentTool
+from .ask_user import AskUserTool
 from .bash import BashTool
+from .brief import BriefTool
 from .edit import EditFileTool
 from .glob_tool import GlobTool
 from .grep import GrepTool
 from .read import ReadFileTool
+from .skill import SkillTool
+from .todo_write import TodoWriteTool
+from .web_fetch import WebFetchTool
+from .web_search import WebSearchTool
 from .write import WriteFileTool
 
 _TOOL_TYPES = [
@@ -16,6 +22,12 @@ _TOOL_TYPES = [
     GlobTool,
     GrepTool,
     AgentTool,
+    SkillTool,
+    WebFetchTool,
+    WebSearchTool,
+    TodoWriteTool,
+    BriefTool,
+    AskUserTool,
 ]
 
  

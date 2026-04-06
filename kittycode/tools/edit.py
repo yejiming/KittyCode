@@ -8,11 +8,11 @@ from .base import Tool
 
 class EditFileTool(Tool):
     name = "edit_file"
-    description = (
-        "Edit a file by replacing an exact string match. "
-        "old_string must appear exactly once in the file for safety. "
-        "Include enough surrounding context to ensure uniqueness."
-    )
+    description = """
+    Edit a file by replacing an exact string match.
+    old_string must appear exactly once in the file for safety.
+    Include enough surrounding context to ensure uniqueness.
+    """
     parameters = {
         "type": "object",
         "properties": {

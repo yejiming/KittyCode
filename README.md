@@ -4,6 +4,8 @@ KittyCode is a minimal terminal coding agent focused on a compact, readable impl
 
 ## Background
 
+KittyCode is inspired by [NanoCoder](https://github.com/he-yufeng/NanoCoder) and keeps the same general idea of a small terminal coding agent while simplifying the project around the core runtime.
+
 KittyCode follows a simple terminal-agent runtime model:
 
 - A user message is sent through the configured model interface.
@@ -17,11 +19,8 @@ The project is intentionally small. It includes the core agent runtime, a compac
 
 - Minimal agent loop with optional parallel execution for multiple tool calls.
 - LLM adapter that supports both OpenAI-compatible and Anthropic interfaces.
-- Built-in tools for shell commands, file reading, file writing, targeted editing, glob search, regex search, and sub-agents.
-- Startup skill discovery from `~/.kittycode/skills`, with skill metadata injected into the system prompt each round.
-- Interactive REPL and one-shot command mode.
-- ANSI pixel-cat startup banner.
-- `Esc` interrupt support for stopping the current agent run at the next safe checkpoint.
+- Core built-in tools for shell execution, file operations, web search, web fetch/crawling, TODO tracking, and sub-agents.
+- Interactive REPL and one-shot command mode, with `Esc` interrupt support.
 - Context compression to keep long sessions manageable.
 - Session save and resume support.
 
@@ -32,17 +31,10 @@ The project is intentionally small. It includes the core agent runtime, a compac
 
 ## Installation
 
-Clone the repository and install it in editable mode:
+Install from PyPI:
 
 ```bash
-cd KittyCode
-python -m pip install -e .
-```
-
-If you also want the development test dependency:
-
-```bash
-python -m pip install -e .[dev]
+pip install kittycode
 ```
 
 ## Configuration
@@ -168,46 +160,6 @@ Inside the REPL, KittyCode supports:
 
 The `/skills` command refreshes the local skill cache if the skill directory has changed and then prints the currently loaded skills.
 Slash commands also support prefix matching while typing, so entering `/` shows matching commands and skills through completion suggestions.
-
-## If `kittycode` Is Still Not Found After `pip install -e .`
-
-The project already declares the console entry point in `pyproject.toml`:
-
-```toml
-[project.scripts]
-kittycode = "kittycode.cli:main"
-```
-
-So if `kittycode` is still unavailable, the usual cause is the local Python install location rather than missing packaging metadata.
-
-Check which Python/pip you used:
-
-```bash
-python3 -m pip --version
-python3 -m site --user-base
-```
-
-On macOS, a user install commonly places scripts under:
-
-```bash
-~/Library/Python/3.11/bin
-```
-
-If that directory is not in `PATH`, the editable install may succeed but the shell still will not find `kittycode`.
-
-For `zsh`, add the corresponding bin directory to your shell profile:
-
-```bash
-export PATH="$HOME/Library/Python/3.11/bin:$PATH"
-```
-
-Then reload the shell:
-
-```bash
-source ~/.zshrc
-```
-
-If the install itself fails with a permissions error while writing a `.pth` file under `~/Library/Python/.../site-packages`, fix that environment issue first or install into a virtual environment before retrying.
 
 ## Project Layout
 

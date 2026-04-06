@@ -25,13 +25,29 @@ _DANGEROUS_PATTERNS = [
     (r"\bwget\b.*\|\s*(sudo\s+)?bash", "pipe wget to bash"),
 ]
 
+_AVOID_COMMANDS = [
+    "cat", "head", "tail", "sed", "awk", "echo",
+    "find", "grep", "cat", "head", "tail", "sed", "awk", "echo"
+]
+
 
 class BashTool(Tool):
     name = "bash"
-    description = (
-        "Execute a shell command. Returns stdout, stderr, and exit code. "
-        "Use this for running tests, installing packages, git operations, and similar tasks."
-    )
+    description = f"""
+    Execute a shell command. Returns stdout, stderr, and exit code.
+    Use this for running tests, installing packages, git operations, and similar tasks.
+    The working directory persists between commands, but shell state does not. The shell environment is initialized from the user's profile (bash or zsh).
+    IMPORTANT: Avoid using this tool to run {', '.join(_AVOID_COMMANDS)} commands, unless explicitly instructed or after you have verified that a dedicated tool cannot accomplish your task. Instead, use the appropriate dedicated tool as this will provide a much better experience for the user.
+    File search: Use glob tool (NOT find or ls)
+    Content search: Use grep tool (NOT grep or rg)
+    Read files: Use read_file tool (NOT cat/head/tail)
+    Edit files: Use edit_file tool (NOT sed/awk)
+    Write files: Use write_file tool (NOT echo >/cat <<EOF)
+    Communication: Output text directly (NOT echo/printf)
+    If your command will create new directories or files, first use this tool to run `ls` to verify the parent directory exists and is the correct location.
+    Always quote file paths that contain spaces with double quotes in your command (e.g., cd "path with spaces/file.txt")
+    Try to maintain your current working directory throughout the session by using absolute paths and avoiding usage of `cd`. You may use `cd` if the User explicitly requests it.
+    """
     parameters = {
         "type": "object",
         "properties": {

@@ -4,13 +4,17 @@ import re
 
 from rich.console import Console
 
+from kittycode import __version__
 from kittycode.cli import (
     _BOLD,
     _PIXEL_CAT_ART,
     _RESET,
     _build_input_reader,
+    _format_question_prompt,
     _merge_columns,
+    _parse_question_answer,
     _pixel_cat_banner,
+    _render_brief_attachments,
     _render_startup_header,
     _show_help,
     _startup_right_box_lines,
@@ -25,7 +29,7 @@ def test_pixel_cat_banner_contains_ansi_blocks():
     banner = _pixel_cat_banner()
 
     assert "\x1b[" in banner
-    assert "/\\_/\\\\" in banner
+    assert " /\\_/\\" in banner
     assert "KittyCode" in banner
 
 
@@ -33,7 +37,7 @@ def test_pixel_cat_art_has_cat_ear_silhouette():
     lines = _PIXEL_CAT_ART.splitlines()
 
     assert lines[:3] == [
-        "\x1b[38;5;240m /\\_/\\\\\x1b[0m",
+        "\x1b[38;5;240m /\\_/\\\x1b[0m",
         "\x1b[38;5;240m(\x1b[38;5;215m \x1b[38;5;255mo.o\x1b[38;5;215m \x1b[38;5;240m)\x1b[38;5;215m___________\x1b[0m",
         "\x1b[38;5;240m \x1b[38;5;215m>\x1b[38;5;240m \x1b[38;5;218m^\x1b[38;5;240m           __)\x1b[0m",
     ]
@@ -71,7 +75,7 @@ def test_render_startup_header_hides_right_column_when_narrow():
     console.print(_render_startup_header(config, width=40))
     output = console.export_text()
 
-    assert "KittyCode v0.1.0" in output
+    assert f"KittyCode v{__version__}" in output
     assert "Model: gpt-4o" in output
     assert "Interface: openai" not in output
     assert "Base: https://api.openai.com/v1" not in output
@@ -84,7 +88,7 @@ def test_startup_left_box_centers_cat_art():
 
     assert lines[0].startswith("\x1b[38;5;81m╭")
     assert lines[-1].endswith("╯\x1b[0m")
-    assert " /\\_/\\\\" in lines[1]
+    assert " /\\_/\\" in lines[1]
     assert lines[1].count(" ") > 4
 
 
@@ -134,3 +138,57 @@ def test_build_input_reader_uses_prompt_toolkit_session():
 
 def test_show_help_renders_without_name_error():
     _show_help()
+
+
+def test_format_question_prompt_lists_options_and_free_text_hint():
+    prompt = _format_question_prompt(
+        {
+            "header": "Library",
+            "question": "Which library should we use?",
+            "options": [
+                {"label": "requests", "description": "HTTP client", "recommended": True},
+                {"label": "urllib", "description": "stdlib", "recommended": False},
+            ],
+            "multiSelect": False,
+            "allowFreeformInput": True,
+        }
+    )
+
+    assert "1. requests (recommended) - HTTP client" in prompt
+    assert "2. urllib - stdlib" in prompt
+    assert "You can also enter free text." in prompt
+
+
+def test_parse_question_answer_supports_single_and_multi_select():
+    single = {
+        "options": [
+            {"label": "A"},
+            {"label": "B"},
+        ],
+        "multiSelect": False,
+        "allowFreeformInput": False,
+    }
+    multi = {
+        "options": [
+            {"label": "A"},
+            {"label": "B"},
+            {"label": "C"},
+        ],
+        "multiSelect": True,
+        "allowFreeformInput": False,
+    }
+
+    assert _parse_question_answer("2", single) == "B"
+    assert _parse_question_answer("1,3", multi) == "A, C"
+
+
+def test_render_brief_attachments_formats_attachment_lines():
+    lines = _render_brief_attachments(
+        {
+            "attachments": [
+                {"path": "/tmp/file.txt", "size": 42, "is_image": False},
+            ]
+        }
+    )
+
+    assert lines == ["[dim]Attachment:[/dim] /tmp/file.txt (42 bytes, image=False)"]

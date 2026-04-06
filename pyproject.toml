@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kittycode"
-version = "0.1.2"
+version = "0.1.3"
 description = "Minimal AI coding agent with a simple tool loop and skill support."
 readme = "README.md"
 license = "MIT"
@@ -15,9 +15,11 @@ authors = [
 keywords = ["ai", "agent", "coding", "cli", "llm"]
 dependencies = [
     "anthropic>=0.84.0",
+    "beautifulsoup4>=4.12",
     "openai>=1.0",
     "rich>=13.0",
     "prompt_toolkit>=3.0",
+    "requests>=2.31",
 ]
 
 [tool.hatch.build.targets.wheel]

@@ -14,14 +14,14 @@ from kittycode.session import list_sessions, load_session, save_session
 
 
 def test_version():
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.1.2"
 
 
 def test_public_api_exports():
     assert Agent is not None
     assert LLM is not None
     assert Config is not None
-    assert len(ALL_TOOLS) == 7
+    assert len(ALL_TOOLS) == 13
 
 
 def test_config_from_file(tmp_path):

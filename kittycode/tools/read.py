@@ -7,7 +7,9 @@ from .base import Tool
 
 class ReadFileTool(Tool):
     name = "read_file"
-    description = "Read a file's contents with line numbers. Always read a file before editing it."
+    description = """
+    Read a file's contents with line numbers. Always read a file before editing it.
+    """
     parameters = {
         "type": "object",
         "properties": {

@@ -2,11 +2,12 @@
 
 import os
 import platform
+import textwrap
 
 
 def system_prompt(tools, skills=None) -> str:
     cwd = os.getcwd()
-    tool_list = "\n".join(f"- **{tool.name}**: {tool.description}" for tool in tools)
+    tool_list = "\n".join(_format_tool_entry(tool) for tool in tools)
     uname = platform.uname()
     skill_block = _format_skill_block(skills or [])
 
@@ -49,3 +50,15 @@ def _format_skill_block(skills) -> str:
         lines.append(f"  description: {skill.description}")
         lines.append(f"  path: {skill.path}")
     return "\n".join(lines)
+
+
+def _format_tool_entry(tool) -> str:
+    description = textwrap.dedent(tool.description).strip()
+    lines = [line.strip() for line in description.splitlines() if line.strip()]
+    if not lines:
+        return f"- **{tool.name}**"
+    if len(lines) == 1:
+        return f"- **{tool.name}**: {lines[0]}"
+    return "\n".join(
+        [f"- **{tool.name}**: {lines[0]}"] + [f"  {line}" for line in lines[1:]]
+    )

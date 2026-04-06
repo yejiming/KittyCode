@@ -1,8 +1,10 @@
 """Interactive CLI for KittyCode."""
 
 import argparse
+import copy
 import inspect
 import os
+import queue
 import select
 import re
 import sys
@@ -29,6 +31,7 @@ from rich.text import Text
 from . import __version__
 from .agent import Agent
 from .config import CONFIG_PATH, Config
+from .interrupts import CancellationRequested
 from .llm import LLM
 from .session import list_sessions, load_session, save_session
 
@@ -65,6 +68,16 @@ _BUILTIN_COMMANDS = {
     "/sessions": "List saved sessions",
     "/quit": "Exit KittyCode",
 }
+
+
+def _merge_completed_worker_state(agent, worker_agent):
+    if worker_agent is agent:
+        return agent
+
+    for attr in ("messages", "todos", "brief_messages"):
+        if hasattr(agent, attr) and hasattr(worker_agent, attr):
+            setattr(agent, attr, copy.deepcopy(getattr(worker_agent, attr)))
+    return agent
 
 
 class SlashCommandCompleter(Completer):
@@ -178,6 +191,15 @@ def _run_once(agent: Agent, prompt: str):
     def on_tool_output(name, text):
         if name == "bash":
             live_tool_output.append(text)
+
+    def on_brief(payload):
+        live_tool_output.finish()
+        console.print(_render_brief_message(payload))
+        for line in _render_brief_attachments(payload):
+            console.print(line)
+
+    agent.on_brief_message = on_brief
+    agent.ask_user_handler = _non_interactive_ask_user
 
     response = agent.chat(prompt, on_token=on_token, on_tool=on_tool, on_tool_output=on_tool_output)
     live_tool_output.finish()
@@ -301,6 +323,12 @@ def _repl(agent: Agent, config: Config):
             if name == "bash":
                 input_reader.append_live_tool_output(text)
 
+        def on_brief(payload):
+            input_reader.finish_live_tool_output()
+            input_reader.print(_render_brief_message(payload))
+            for line in _render_brief_attachments(payload):
+                input_reader.print(line)
+
         try:
             response, interrupted, next_agent = _run_agent_with_escape_interrupt(
                 agent,
@@ -308,6 +336,8 @@ def _repl(agent: Agent, config: Config):
                 on_token=on_token,
                 on_tool=on_tool,
                 on_tool_output=on_tool_output,
+                ask_user=lambda questions: _ask_user_questions(input_reader, questions),
+                on_brief=on_brief,
             )
             agent = next_agent
             input_reader.finish_live_tool_output()
@@ -408,6 +438,140 @@ def _build_skill_request(skill, task: str) -> str:
         "Before doing other work, read its SKILL.md and any related files under that path.\n\n"
         f"Task:\n{task}"
     )
+
+
+def _render_brief_message(payload: dict):
+    status = payload.get("status", "normal")
+    title = "Proactive Update" if status == "proactive" else "User Update"
+    border_style = "yellow" if status == "proactive" else "cyan"
+    return Panel(Markdown(payload.get("message", "")), title=title, border_style=border_style)
+
+
+def _render_brief_attachments(payload: dict) -> list[str]:
+    lines = []
+    for attachment in payload.get("attachments") or []:
+        lines.append(
+            "[dim]Attachment:[/dim] "
+            f"{attachment['path']} ({attachment['size']} bytes, image={attachment['is_image']})"
+        )
+    return lines
+
+
+def _non_interactive_ask_user(_questions):
+    raise RuntimeError("ask_user is only available in interactive mode")
+
+
+def _ask_user_questions(io, questions: list[dict]) -> dict[str, str]:
+    answers: dict[str, str] = {}
+
+    for item in questions:
+        io.finish_live_tool_output()
+        io.print(
+            Panel(
+                _format_question_prompt(item),
+                title=item["header"],
+                border_style="cyan",
+            )
+        )
+
+        while True:
+            try:
+                raw = io.prompt(f"{item['header']} >").strip()
+            except (EOFError, KeyboardInterrupt):
+                return answers
+
+            parsed = _parse_question_answer(raw, item)
+            if parsed is not None:
+                answers[item["question"]] = parsed
+                break
+
+            io.print(
+                "[yellow]Invalid response. Use option numbers like 1 or 1,3, "
+                "or enter text when free-form input is allowed.[/yellow]"
+            )
+
+    return answers
+
+
+def _format_question_prompt(item: dict) -> str:
+    lines = [item["question"]]
+    options = item.get("options") or []
+
+    if options:
+        lines.append("")
+        for index, option in enumerate(options, 1):
+            line = f"{index}. {option['label']}"
+            if option.get("recommended"):
+                line += " (recommended)"
+            if option.get("description"):
+                line += f" - {option['description']}"
+            lines.append(line)
+        lines.append("")
+        if item.get("multiSelect"):
+            lines.append("Reply with one or more option numbers separated by commas.")
+        else:
+            lines.append("Reply with one option number.")
+        if item.get("allowFreeformInput", True):
+            lines.append("You can also enter free text.")
+    else:
+        lines.extend(["", "Reply with free text."])
+
+    return "\n".join(lines)
+
+
+def _parse_question_answer(raw: str, item: dict) -> str | None:
+    text = raw.strip()
+    if not text:
+        return None
+
+    options = item.get("options") or []
+    if not options:
+        return text
+
+    multi_select = bool(item.get("multiSelect", False))
+    allow_freeform = bool(item.get("allowFreeformInput", True))
+    parts = [part.strip() for part in text.split(",")] if multi_select else [text]
+    if not parts or any(not part for part in parts):
+        return None
+
+    answers: list[str] = []
+    for part in parts:
+        if part.isdigit():
+            index = int(part) - 1
+            if 0 <= index < len(options):
+                answers.append(options[index]["label"])
+                continue
+            return None
+
+        matched = next(
+            (option["label"] for option in options if option["label"].casefold() == part.casefold()),
+            None,
+        )
+        if matched is not None:
+            answers.append(matched)
+            continue
+
+        if allow_freeform:
+            answers.append(part)
+            continue
+
+        return None
+
+    if not multi_select and len(answers) != 1:
+        return None
+    return ", ".join(_dedupe_strings(answers))
+
+
+def _dedupe_strings(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        marker = value.casefold()
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(value)
+    return result
 
 
 def _brief(kwargs: dict, maxlen: int = 80) -> str:
@@ -633,11 +797,20 @@ class _LiveToolOutputRenderer:
         self.start()
 
 
-def _run_agent_with_escape_interrupt(agent: Agent, user_input: str, on_token=None, on_tool=None, on_tool_output=None):
+def _run_agent_with_escape_interrupt(
+    agent: Agent,
+    user_input: str,
+    on_token=None,
+    on_tool=None,
+    on_tool_output=None,
+    ask_user=None,
+    on_brief=None,
+):
     cancel_event = threading.Event()
     callback_gate = threading.Event()
     callback_gate.set()
     worker_agent = agent.fork() if hasattr(agent, "fork") else agent
+    pending_questions: queue.Queue[tuple[list[dict], dict, threading.Event]] = queue.Queue()
     result: dict[str, str] = {}
     error: dict[str, BaseException] = {}
 
@@ -653,6 +826,12 @@ def _run_agent_with_escape_interrupt(agent: Agent, user_input: str, on_token=Non
 
     def worker():
         try:
+            worker_agent.ask_user_handler = _make_ask_user_bridge(
+                pending_questions,
+                cancel_event,
+                ask_user,
+            )
+            worker_agent.on_brief_message = _guard(on_brief)
             chat_kwargs = {
                 "on_token": _guard(on_token),
                 "on_tool": _guard(on_tool),
@@ -674,10 +853,13 @@ def _run_agent_with_escape_interrupt(agent: Agent, user_input: str, on_token=Non
     interrupted = False
     monitor = _create_escape_monitor(cancel_event)
     if monitor is None:
-        thread.join()
+        while thread.is_alive():
+            _service_user_question_requests(pending_questions, ask_user, cancel_event)
+            thread.join(0.05)
     else:
         with monitor:
             while thread.is_alive():
+                _service_user_question_requests(pending_questions, ask_user, cancel_event)
                 if monitor.poll(0.05):
                     interrupted = True
                     break
@@ -685,8 +867,11 @@ def _run_agent_with_escape_interrupt(agent: Agent, user_input: str, on_token=Non
 
     if interrupted and thread.is_alive():
         callback_gate.clear()
+        _cancel_pending_user_question_requests(pending_questions)
+        _merge_completed_worker_state(agent, worker_agent)
         return "(interrupted)", True, agent
 
+    _service_user_question_requests(pending_questions, ask_user, cancel_event)
     thread.join()
     callback_gate.clear()
 
@@ -695,6 +880,62 @@ def _run_agent_with_escape_interrupt(agent: Agent, user_input: str, on_token=Non
 
     was_interrupted = interrupted or cancel_event.is_set() or result.get("response") == "(interrupted)"
     return result.get("response", ""), was_interrupted, agent if was_interrupted else worker_agent
+
+
+def _make_ask_user_bridge(pending_questions, cancel_event, ask_user):
+    if ask_user is None:
+        return _non_interactive_ask_user
+
+    def bridge(questions):
+        payload: dict[str, object] = {}
+        done = threading.Event()
+        pending_questions.put((questions, payload, done))
+        while not done.wait(0.05):
+            if cancel_event.is_set():
+                raise CancellationRequested()
+        error = payload.get("error")
+        if error is not None:
+            raise error
+        return payload.get("answers", {})
+
+    return bridge
+
+
+def _service_user_question_requests(pending_questions, ask_user, cancel_event) -> None:
+    if ask_user is None:
+        _cancel_pending_user_question_requests(pending_questions)
+        return
+
+    while True:
+        try:
+            questions, payload, done = pending_questions.get_nowait()
+        except queue.Empty:
+            return
+
+        if cancel_event.is_set():
+            payload["error"] = CancellationRequested()
+            done.set()
+            continue
+
+        try:
+            payload["answers"] = ask_user(questions)
+        except (EOFError, KeyboardInterrupt):
+            cancel_event.set()
+            payload["error"] = CancellationRequested()
+        except Exception as exc:  # pragma: no cover - defensive transport
+            payload["error"] = exc
+        finally:
+            done.set()
+
+
+def _cancel_pending_user_question_requests(pending_questions) -> None:
+    while True:
+        try:
+            _questions, payload, done = pending_questions.get_nowait()
+        except queue.Empty:
+            return
+        payload["error"] = CancellationRequested()
+        done.set()
 
 
 def _create_escape_monitor(cancel_event, stream=None):

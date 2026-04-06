@@ -7,10 +7,11 @@ from .base import Tool
 
 class WriteFileTool(Tool):
     name = "write_file"
-    description = (
-        "Create a new file or completely overwrite an existing one. "
-        "For small edits to existing files, prefer edit_file instead."
-    )
+    description = """
+    Create a new file or completely overwrite an existing one.
+    If this is an existing file, you MUST use the read_file tool first to read the file's contents. This tool will fail if you did not read the file first.
+    For small edits to existing files, prefer the edit_file tool instead.
+    """
     parameters = {
         "type": "object",
         "properties": {

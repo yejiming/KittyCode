@@ -157,3 +157,119 @@ def test_interrupted_run_does_not_emit_late_output_or_replace_agent(monkeypatch)
     assert second_response == "new"
     assert second_agent is new_worker
     assert seen == ["new"]
+
+
+class MessageSnapshotWorker:
+    def __init__(self, started=None, release=None):
+        self.started = started or threading.Event()
+        self.release = release or threading.Event()
+        self.messages = []
+
+    def chat(self, _user_input, on_token=None, on_tool=None, cancel_event=None):
+        self.messages.append({"role": "user", "content": _user_input})
+        self.messages.append(
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"command\":\"sleep 10\"}"},
+                    }
+                ],
+            }
+        )
+        self.messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "partial tool result",
+            }
+        )
+        self.started.set()
+        self.release.wait()
+        self.messages.append({"role": "assistant", "content": "late message"})
+        if on_token is not None:
+            on_token("late token")
+        return "(interrupted)" if cancel_event is not None and cancel_event.is_set() else "done"
+
+
+class SnapshotParentAgent:
+    def __init__(self, worker):
+        self.worker = worker
+        self.messages = []
+
+    def fork(self):
+        self.worker.messages = list(self.messages)
+        return self.worker
+
+
+def test_interrupted_run_merges_completed_worker_messages_without_late_mutations(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    worker = MessageSnapshotWorker(started=started, release=release)
+    agent = SnapshotParentAgent(worker)
+    seen = []
+
+    def fake_create_escape_monitor(cancel_event, stream=None):
+        return ImmediateInterruptMonitor(cancel_event, worker)
+
+    monkeypatch.setattr("kittycode.cli._create_escape_monitor", fake_create_escape_monitor)
+
+    try:
+        response, interrupted, returned_agent = _run_agent_with_escape_interrupt(
+            agent,
+            "hello",
+            on_token=seen.append,
+        )
+
+        assert interrupted is True
+        assert response == "(interrupted)"
+        assert returned_agent is agent
+        assert returned_agent.messages == [
+            {"role": "user", "content": "hello"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": "{\"command\":\"sleep 10\"}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call_1",
+                "content": "partial tool result",
+            },
+        ]
+
+        release.set()
+        time.sleep(0.05)
+        time.sleep(0.05)
+    finally:
+        release.set()
+
+    assert returned_agent.messages == [
+        {"role": "user", "content": "hello"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "bash", "arguments": "{\"command\":\"sleep 10\"}"},
+                }
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": "partial tool result",
+        },
+    ]
+    assert seen == []
