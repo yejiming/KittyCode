@@ -1,6 +1,6 @@
 """KittyCode - minimal AI coding agent."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from kittycode.agent import Agent
 from kittycode.config import Config

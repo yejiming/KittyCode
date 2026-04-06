@@ -1,5 +1,7 @@
 """Tests for local skill discovery and prompt injection."""
 
+from types import SimpleNamespace
+
 from prompt_toolkit.document import Document
 
 from kittycode.cli import (
@@ -13,7 +15,7 @@ from kittycode.cli import (
 from pathlib import Path
 
 from kittycode.agent import Agent
-from kittycode.prompt import system_prompt
+from kittycode.prompt import system_prompt, user_prompt
 from kittycode.skills import SkillDefinition, load_skills
 from kittycode.tools import ALL_TOOLS
 
@@ -21,6 +23,19 @@ from kittycode.tools import ALL_TOOLS
 class DummyLLM:
     def chat(self, *args, **kwargs):
         raise AssertionError("DummyLLM.chat should not be called in these tests")
+
+
+class RecordingLLM:
+    def __init__(self):
+        self.captured_messages = []
+
+    def chat(self, messages, *args, **kwargs):
+        self.captured_messages.append(messages)
+        return SimpleNamespace(
+            tool_calls=[],
+            message={"role": "assistant", "content": "done"},
+            content="done",
+        )
 
 
 def test_load_skills_reads_front_matter(tmp_path):
@@ -69,34 +84,72 @@ def test_load_skills_auto_reloads_after_change(tmp_path):
     assert second[0].description == "New description"
 
 
-def test_system_prompt_includes_skills_at_top():
+def test_system_prompt_mentions_reminder_tags_instead_of_embedding_skills():
     prompt = system_prompt(
         ALL_TOOLS[:1],
         [SkillDefinition(name="Skill A", description="Does A", path="/tmp/skill-a")],
     )
 
-    assert prompt.startswith("# Available Skills")
+    assert "<system-reminder>" in prompt
+    assert "<todo-reminder>" in prompt
+    assert "available skill blocks" in prompt
+    assert "name: Skill A" not in prompt
+
+
+def test_user_prompt_appends_skill_and_todo_reminders():
+    prompt = user_prompt(
+        "Inspect the repository",
+        [SkillDefinition(name="Skill A", description="Does A", path="/tmp/skill-a")],
+        [
+            {
+                "content": "Run tests",
+                "active_form": "Running tests",
+                "status": "in_progress",
+            }
+        ],
+    )
+
+    assert prompt.startswith("Inspect the repository")
+    assert "<system-reminder>" in prompt
     assert "name: Skill A" in prompt
     assert "description: Does A" in prompt
     assert "path: /tmp/skill-a" in prompt
+    assert "<todo-reminder>" in prompt
+    assert "[in_progress] Run tests" in prompt
+    assert "active_form: Running tests" in prompt
 
 
-def test_agent_loads_skills_into_system_prompt(monkeypatch):
+def test_agent_appends_skill_and_todo_reminders_to_chat_messages(monkeypatch):
     loaded_skill = SkillDefinition(name="Skill B", description="Does B", path="/tmp/skill-b")
     monkeypatch.setattr(
         "kittycode.agent.load_skills",
         lambda force_reload=False: [loaded_skill],
     )
 
-    agent = Agent(llm=DummyLLM())
-    messages = agent._full_messages()
+    llm = RecordingLLM()
+    agent = Agent(llm=llm)
+    agent.todos = [
+        {
+            "content": "Inspect runtime",
+            "active_form": "Inspecting runtime",
+            "status": "in_progress",
+        }
+    ]
+
+    reply = agent.chat("hello")
 
     assert agent.skills == [loaded_skill]
-    assert messages[0]["role"] == "system"
-    assert "name: Skill B" in messages[0]["content"]
+    assert reply == "done"
+    assert llm.captured_messages
+    user_message = llm.captured_messages[0][1]
+    assert user_message["role"] == "user"
+    assert user_message["content"].startswith("hello")
+    assert "name: Skill B" in user_message["content"]
+    assert "<todo-reminder>" in user_message["content"]
+    assert "Inspect runtime" in user_message["content"]
 
 
-def test_agent_refreshes_skills_each_round(tmp_path, monkeypatch):
+def test_agent_refreshes_skills_each_user_turn(tmp_path, monkeypatch):
     skill_dir = tmp_path / "live-skill"
     skill_dir.mkdir()
     skill_doc = skill_dir / "SKILL.md"
@@ -107,12 +160,15 @@ def test_agent_refreshes_skills_each_round(tmp_path, monkeypatch):
         lambda force_reload=False: load_skills(tmp_path, force_reload=force_reload),
     )
 
-    agent = Agent(llm=DummyLLM())
-    assert "First version" in agent._full_messages()[0]["content"]
+    llm = RecordingLLM()
+    agent = Agent(llm=llm)
+    agent.chat("first")
+    assert "First version" in llm.captured_messages[0][1]["content"]
 
     skill_doc.write_text("name: Live Skill\ndescription: Updated version\n")
 
-    assert "Updated version" in agent._full_messages()[0]["content"]
+    agent.chat("second")
+    assert "Updated version" in llm.captured_messages[1][-1]["content"]
 
 
 def test_format_skills_output():

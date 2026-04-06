@@ -15,8 +15,9 @@ class SkillTool(Tool):
     name = "skill"
     description = """
     Load a local skill from ~/.kittycode/skills and inject its instructions
-    into the current run. Use this when one of the listed skills matches the
-    user's request.
+    into the current run. Available skill blocks are surfaced through
+    <system-reminder> tags in the conversation. Use this when one of the
+    listed skills matches the user's request.
     """
     parameters = {
         "type": "object",

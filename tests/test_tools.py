@@ -215,6 +215,13 @@ def test_skill_tool_reads_selected_skill(tmp_path, monkeypatch):
     assert str(skill_dir / "extra.txt") in result
 
 
+def test_skill_tool_description_mentions_system_reminder_tags():
+    skill_tool = get_tool("skill")
+
+    assert "<system-reminder>" in skill_tool.description
+    assert "Available skill blocks" in skill_tool.description
+
+
 def test_web_fetch_returns_summary(monkeypatch):
     monkeypatch.setattr(
         "kittycode.tools.web_fetch._fetch_url",

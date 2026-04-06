@@ -9,7 +9,9 @@ from kittycode.cli import (
     _BOLD,
     _PIXEL_CAT_ART,
     _RESET,
+    _brief,
     _build_input_reader,
+    _format_tool_call,
     _format_question_prompt,
     _merge_columns,
     _parse_question_answer,
@@ -192,3 +194,34 @@ def test_render_brief_attachments_formats_attachment_lines():
     )
 
     assert lines == ["[dim]Attachment:[/dim] /tmp/file.txt (42 bytes, image=False)"]
+
+
+def test_format_tool_call_shows_full_todo_write_payload():
+    rendered = _format_tool_call(
+        "todo_write",
+        {
+            "todos": [
+                {
+                    "content": "Inspect runtime behavior for todo rendering",
+                    "active_form": "Inspecting runtime behavior for todo rendering",
+                    "status": "in_progress",
+                },
+                {
+                    "content": "Verify that every todo item is visible in the CLI output",
+                    "active_form": "Verifying that every todo item is visible in the CLI output",
+                    "status": "pending",
+                },
+            ]
+        },
+    )
+
+    assert rendered.startswith("todo_write(")
+    assert "Verify that every todo item is visible in the CLI output" in rendered
+    assert "..." not in rendered
+
+
+def test_brief_uses_400_character_limit_for_non_todo_tools():
+    summary = _brief({f"payload_{i}": "x" * 60 for i in range(20)})
+
+    assert len(summary) == 403
+    assert summary.endswith("...")

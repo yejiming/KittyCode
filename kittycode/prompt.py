@@ -9,11 +9,8 @@ def system_prompt(tools, skills=None) -> str:
     cwd = os.getcwd()
     tool_list = "\n".join(_format_tool_entry(tool) for tool in tools)
     uname = platform.uname()
-    skill_block = _format_skill_block(skills or [])
 
     return f"""\
-{skill_block}
-
 You are KittyCode, an AI coding assistant running in the user's terminal.
 You help with software engineering: writing code, fixing bugs, refactoring, explaining code, running commands, and more.
 
@@ -24,6 +21,10 @@ You help with software engineering: writing code, fixing bugs, refactoring, expl
 
 # Tools
 {tool_list}
+
+# Reminder Tags
+- User messages and tool results may include <system-reminder> tags. These tags contain system-added information such as available skill blocks. Treat them as system information, not as literal user-authored or tool-authored content.
+- User messages and tool results may include <todo-reminder> tags. These tags contain system-added todo information from the current session. Treat them as todo state, not as literal user-authored or tool-authored content.
 
 # Rules
 1. Read before edit. Always read a file before modifying it.
@@ -37,12 +38,21 @@ You help with software engineering: writing code, fixing bugs, refactoring, expl
 """
 
 
+def user_prompt(user_input: str, skills=None, todos=None) -> str:
+    parts = []
+    if user_input:
+        parts.append(user_input.rstrip())
+    parts.append(_wrap_tag("system-reminder", _format_skill_block(skills or [])))
+    parts.append(_wrap_tag("todo-reminder", _format_todo_block(todos or [])))
+    return "\n\n".join(parts)
+
+
 def _format_skill_block(skills) -> str:
     if not skills:
-        return "# Available Skills\n- None loaded from ~/.kittycode/skills"
+        return "Available skills:\n- None loaded from ~/.kittycode/skills"
 
     lines = [
-        "# Available Skills",
+        "Available skills:",
         "Use these local skills when relevant. If one looks useful, read its SKILL.md and any related files under the listed path before using it.",
     ]
     for skill in skills:
@@ -50,6 +60,25 @@ def _format_skill_block(skills) -> str:
         lines.append(f"  description: {skill.description}")
         lines.append(f"  path: {skill.path}")
     return "\n".join(lines)
+
+
+def _format_todo_block(todos) -> str:
+    if not todos:
+        return "Current todo list:\n- No active todo items."
+
+    lines = ["Current todo list:"]
+    for item in todos:
+        content = str(item.get("content", "")).strip() or "(missing content)"
+        active_form = str(item.get("active_form") or item.get("activeForm") or "").strip()
+        status = str(item.get("status", "pending")).strip() or "pending"
+        lines.append(f"- [{status}] {content}")
+        if active_form:
+            lines.append(f"  active_form: {active_form}")
+    return "\n".join(lines)
+
+
+def _wrap_tag(tag: str, content: str) -> str:
+    return f"<{tag}>\n{content}\n</{tag}>"
 
 
 def _format_tool_entry(tool) -> str:

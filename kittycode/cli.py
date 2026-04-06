@@ -33,6 +33,7 @@ from .agent import Agent
 from .config import CONFIG_PATH, Config
 from .interrupts import CancellationRequested
 from .llm import LLM
+from .logging_utils import configure_logging
 from .session import list_sessions, load_session, save_session
 
 console = Console()
@@ -116,6 +117,7 @@ def _parse_args():
 
 
 def main():
+    configure_logging()
     args = _parse_args()
     try:
         config = Config.from_file()
@@ -186,7 +188,7 @@ def _run_once(agent: Agent, prompt: str):
 
     def on_tool(name, kwargs):
         live_tool_output.finish()
-        console.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
+        console.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
 
     def on_tool_output(name, text):
         if name == "bash":
@@ -317,7 +319,7 @@ def _repl(agent: Agent, config: Config):
 
         def on_tool(name, kwargs):
             input_reader.finish_live_tool_output()
-            input_reader.print(f"\n[dim]> {name}({_brief(kwargs)})[/dim]")
+            input_reader.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
 
         def on_tool_output(name, text):
             if name == "bash":
@@ -574,9 +576,15 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return result
 
 
-def _brief(kwargs: dict, maxlen: int = 80) -> str:
-    summary = ", ".join(f"{key}={repr(value)[:40]}" for key, value in kwargs.items())
+def _brief(kwargs: dict, maxlen: int = 400) -> str:
+    summary = ", ".join(f"{key}={repr(value)[:200]}" for key, value in kwargs.items())
     return summary[:maxlen] + ("..." if len(summary) > maxlen else "")
+
+
+def _format_tool_call(name: str, kwargs: dict) -> str:
+    if name == "todo_write":
+        return f"{name}({repr(kwargs)})"
+    return f"{name}({_brief(kwargs)})"
 
 
 def _render_startup_header(config: Config, width: int | None = None):

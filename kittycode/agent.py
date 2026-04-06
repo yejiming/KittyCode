@@ -16,7 +16,7 @@ import inspect
 from .context import ContextManager
 from .interrupts import CancellationRequested
 from .llm import LLM
-from .prompt import system_prompt
+from .prompt import system_prompt, user_prompt
 from .skills import load_skills
 from .tools import create_tool_instances, get_tool
 from .tools.agent import AgentTool
@@ -48,8 +48,11 @@ class Agent:
             tool.bind_agent(self)
 
     def _full_messages(self) -> list[dict]:
-        self.refresh_skills()
         return [{"role": "system", "content": self._system}] + self.messages
+
+    def _build_user_message(self, user_input: str) -> str:
+        self.refresh_skills()
+        return user_prompt(user_input, self.skills, self.todos)
 
     def _tool_schemas(self) -> list[dict]:
         return [tool.schema() for tool in self.tools]
@@ -72,7 +75,7 @@ class Agent:
 
     def chat(self, user_input: str, on_token=None, on_tool=None, on_tool_output=None, cancel_event=None) -> str:
         """Process one user message. May involve multiple LLM/tool rounds."""
-        self.messages.append({"role": "user", "content": user_input})
+        self.messages.append({"role": "user", "content": self._build_user_message(user_input)})
         self.context.maybe_compress(self.messages, self.llm)
 
         try:

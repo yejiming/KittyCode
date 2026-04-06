@@ -1,6 +1,7 @@
 """Tests for core modules: config, context, session, imports."""
 
 import json
+import logging
 import types
 import threading
 
@@ -9,12 +10,13 @@ import pytest
 from kittycode import ALL_TOOLS, Agent, Config, LLM, __version__
 from kittycode.context import ContextManager, estimate_tokens
 from kittycode.llm import LLMResponse, ToolCall
+from kittycode.logging_utils import configure_logging
 import kittycode.session as session_module
 from kittycode.session import list_sessions, load_session, save_session
 
 
 def test_version():
-    assert __version__ == "0.1.2"
+    assert __version__ == "0.1.3"
 
 
 def test_public_api_exports():
@@ -138,6 +140,19 @@ def test_list_sessions(tmp_path, monkeypatch):
     monkeypatch.setattr(session_module, "SESSIONS_DIR", tmp_path)
     sessions = list_sessions()
     assert isinstance(sessions, list)
+
+
+def test_configure_logging_writes_to_default_log_file(tmp_path):
+    log_path = configure_logging(base_dir=tmp_path)
+    logger = logging.getLogger("kittycode.test")
+    logger.warning("tool debug line")
+
+    for handler in logging.getLogger("kittycode").handlers:
+        handler.flush()
+
+    assert log_path == tmp_path / "logs" / "kittycode.log"
+    assert log_path.exists()
+    assert "tool debug line" in log_path.read_text(encoding="utf-8")
 
 
 class CancelAwareLLM:

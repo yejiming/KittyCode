@@ -1,6 +1,7 @@
 """LLM provider layer for OpenAI-compatible and Anthropic APIs."""
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 
@@ -9,6 +10,8 @@ from anthropic import Anthropic
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
 
 from .interrupts import CancellationRequested
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -96,72 +99,18 @@ class LLM:
         params: dict = {
             "model": self.model,
             "messages": messages,
-            "stream": True,
+            "stream": False,
             **self.extra,
         }
         if tools:
             params["tools"] = tools
 
-        try:
-            params["stream_options"] = {"include_usage": True}
-            stream = self._call_with_retry(params, cancel_event=cancel_event)
-        except Exception:
-            params.pop("stream_options", None)
-            stream = self._call_with_retry(params, cancel_event=cancel_event)
-
-        content_parts: list[str] = []
-        tool_call_map: dict[int, dict] = {}
-        prompt_tokens = 0
-        completion_tokens = 0
-
-        for chunk in stream:
-            _raise_if_cancelled(cancel_event)
-            if chunk.usage:
-                prompt_tokens = chunk.usage.prompt_tokens
-                completion_tokens = chunk.usage.completion_tokens
-
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-
-            if delta.content:
-                content_parts.append(delta.content)
-                if on_token:
-                    on_token(delta.content)
-
-            if delta.tool_calls:
-                for tool_call_delta in delta.tool_calls:
-                    index = tool_call_delta.index
-                    if index not in tool_call_map:
-                        tool_call_map[index] = {"id": "", "name": "", "args": ""}
-                    if tool_call_delta.id:
-                        tool_call_map[index]["id"] = tool_call_delta.id
-                    if tool_call_delta.function:
-                        if tool_call_delta.function.name:
-                            tool_call_map[index]["name"] = tool_call_delta.function.name
-                        if tool_call_delta.function.arguments:
-                            tool_call_map[index]["args"] += tool_call_delta.function.arguments
-
-        parsed_tool_calls: list[ToolCall] = []
-        for index in sorted(tool_call_map):
-            raw = tool_call_map[index]
-            try:
-                args = json.loads(raw["args"])
-            except (json.JSONDecodeError, KeyError):
-                args = {}
-            parsed_tool_calls.append(
-                ToolCall(id=raw["id"], name=raw["name"], arguments=args)
-            )
-
-        self.total_prompt_tokens += prompt_tokens
-        self.total_completion_tokens += completion_tokens
-
-        return LLMResponse(
-            content="".join(content_parts),
-            tool_calls=parsed_tool_calls,
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-        )
+        completion = self._call_with_retry(params, cancel_event=cancel_event)
+        _raise_if_cancelled(cancel_event)
+        response = _openai_completion_to_response(completion, on_token=on_token)
+        self.total_prompt_tokens += response.prompt_tokens
+        self.total_completion_tokens += response.completion_tokens
+        return response
 
     def _chat_anthropic(
         self,
@@ -186,9 +135,9 @@ class LLM:
         if tools:
             params["tools"] = _to_anthropic_tools(tools)
 
-        message = self._call_anthropic_with_retry(params, cancel_event=cancel_event)
+        message = self._call_anthropic_with_retry(params, on_token=on_token, cancel_event=cancel_event)
         _raise_if_cancelled(cancel_event)
-        response = _anthropic_message_to_response(message, on_token=on_token)
+        response = _anthropic_message_to_response(message)
         self.total_prompt_tokens += response.prompt_tokens
         self.total_completion_tokens += response.completion_tokens
         return response
@@ -207,10 +156,11 @@ class LLM:
                 else:
                     raise
 
-    def _call_anthropic_with_retry(self, params: dict, max_retries: int = 3, cancel_event=None):
+    def _call_anthropic_with_retry(self, params: dict, max_retries: int = 3, on_token=None, cancel_event=None):
         for attempt in range(max_retries):
             try:
-                return self.client.messages.create(**params)
+                with self.client.messages.stream(**params) as stream:
+                    return _consume_anthropic_stream(stream, on_token=on_token, cancel_event=cancel_event)
             except (anthropic.RateLimitError, anthropic.APITimeoutError, anthropic.APIConnectionError):
                 if attempt == max_retries - 1:
                     raise
@@ -221,6 +171,60 @@ class LLM:
                     _sleep_until_retry_or_cancel(2 ** attempt, cancel_event)
                 else:
                     raise
+
+
+def _parse_openai_tool_calls(tool_call_map: dict[int, dict]) -> list[ToolCall]:
+    parsed_tool_calls: list[ToolCall] = []
+    for index in sorted(tool_call_map):
+        raw = tool_call_map[index]
+        logger.debug("OpenAI raw tool call index=%s payload=%r", index, raw)
+        try:
+            args = json.loads(raw["args"])
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.warning(
+                "OpenAI tool call arguments could not be parsed as JSON; "
+                "index=%s id=%r name=%r raw_arguments=%r error=%s",
+                index,
+                raw.get("id", ""),
+                raw.get("name", ""),
+                raw.get("args", ""),
+                exc,
+            )
+            args = {}
+        parsed_tool_calls.append(
+            ToolCall(id=raw.get("id", ""), name=raw.get("name", ""), arguments=args)
+        )
+    return parsed_tool_calls
+
+
+def _openai_completion_to_response(completion, on_token=None) -> LLMResponse:
+    if not getattr(completion, "choices", None):
+        return LLMResponse()
+
+    message = completion.choices[0].message
+    content = getattr(message, "content", "") or ""
+    if content and on_token:
+        on_token(content)
+
+    tool_call_map: dict[int, dict] = {}
+    for index, tool_call in enumerate(getattr(message, "tool_calls", []) or []):
+        function = getattr(tool_call, "function", None)
+        tool_call_map[index] = {
+            "id": getattr(tool_call, "id", "") or "",
+            "name": getattr(function, "name", "") if function else "",
+            "args": getattr(function, "arguments", "") if function else "",
+        }
+
+    usage = getattr(completion, "usage", None)
+    prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+    completion_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+
+    return LLMResponse(
+        content=content,
+        tool_calls=_parse_openai_tool_calls(tool_call_map),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 def _extract_system_message(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -343,6 +347,18 @@ def _anthropic_message_to_response(message, on_token=None) -> LLMResponse:
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
+
+
+def _consume_anthropic_stream(stream, on_token=None, cancel_event=None):
+    text_stream = getattr(stream, "text_stream", None)
+    if text_stream is not None:
+        for text in text_stream:
+            _raise_if_cancelled(cancel_event)
+            if text and on_token:
+                on_token(text)
+
+    _raise_if_cancelled(cancel_event)
+    return stream.get_final_message()
 
 
 def _raise_if_cancelled(cancel_event):
