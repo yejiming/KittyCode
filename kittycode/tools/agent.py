@@ -1,6 +1,7 @@
 """Sub-agent spawning."""
 
 import copy
+from contextlib import nullcontext
 
 from .base import Tool
 
@@ -46,10 +47,86 @@ class AgentTool(Tool):
 
         try:
             result = sub_agent.chat(task, cancel_event=cancel_event)
-            parent.todos = copy.deepcopy(sub_agent.todos)
-            parent.brief_messages = copy.deepcopy(sub_agent.brief_messages)
+            with _parent_state_lock(parent):
+                parent.todos = _merge_todos(getattr(parent, "todos", []), sub_agent.todos)
+                parent.brief_messages = _merge_brief_messages(
+                    getattr(parent, "brief_messages", []),
+                    sub_agent.brief_messages,
+                )
             if len(result) > 5000:
                 result = result[:4500] + "\n... (sub-agent output truncated)"
             return f"[Sub-agent completed]\n{result}"
         except Exception as exc:
             return f"Sub-agent error: {exc}"
+
+
+def _parent_state_lock(parent):
+    lock = getattr(parent, "_state_lock", None) or getattr(parent, "state_lock", None)
+    return lock if lock is not None else nullcontext()
+
+
+def _merge_todos(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    merged = [copy.deepcopy(item) for item in existing]
+    positions = {}
+
+    for index, item in enumerate(merged):
+        marker = _todo_marker(item)
+        if marker is not None and marker not in positions:
+            positions[marker] = index
+
+    for item in incoming or []:
+        copied = copy.deepcopy(item)
+        marker = _todo_marker(copied)
+        if marker is not None and marker in positions:
+            merged[positions[marker]] = copied
+            continue
+        merged.append(copied)
+        if marker is not None:
+            positions[marker] = len(merged) - 1
+
+    return merged
+
+
+def _merge_brief_messages(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    merged = [copy.deepcopy(item) for item in existing]
+    seen = {_brief_marker(item) for item in merged}
+
+    for item in incoming or []:
+        copied = copy.deepcopy(item)
+        marker = _brief_marker(copied)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        merged.append(copied)
+
+    return merged
+
+
+def _todo_marker(item: dict) -> str | None:
+    content = item.get("content")
+    if not isinstance(content, str):
+        return None
+    stripped = content.strip()
+    if not stripped:
+        return None
+    return stripped.casefold()
+
+
+def _brief_marker(item: dict):
+    attachments = []
+    for attachment in item.get("attachments") or []:
+        if isinstance(attachment, dict):
+            attachments.append(
+                (
+                    attachment.get("path"),
+                    attachment.get("size"),
+                    attachment.get("is_image"),
+                )
+            )
+        else:
+            attachments.append(attachment)
+    return (
+        item.get("message"),
+        item.get("status"),
+        tuple(attachments),
+    )
