@@ -16,6 +16,7 @@ venv/
 .DS_Store
 dist/
 .pytest_cache/
+AGENTS.md
 findings.md
 progress.md
 task_plan.md
