@@ -29,7 +29,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from . import __version__
-from .agent import Agent
+from .agent import Agent, repair_incomplete_tool_calls
 from .config import CONFIG_PATH, Config
 from .interrupts import CancellationRequested
 from .llm import LLM
@@ -75,7 +75,12 @@ def _merge_completed_worker_state(agent, worker_agent):
     if worker_agent is agent:
         return agent
 
-    for attr in ("messages", "todos", "brief_messages"):
+    if hasattr(agent, "messages") and hasattr(worker_agent, "messages"):
+        merged_messages = copy.deepcopy(getattr(worker_agent, "messages"))
+        repair_incomplete_tool_calls(merged_messages)
+        setattr(agent, "messages", merged_messages)
+
+    for attr in ("todos", "brief_messages"):
         if hasattr(agent, attr) and hasattr(worker_agent, attr):
             setattr(agent, attr, copy.deepcopy(getattr(worker_agent, attr)))
     return agent

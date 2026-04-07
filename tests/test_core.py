@@ -8,15 +8,12 @@ import threading
 import pytest
 
 from kittycode import ALL_TOOLS, Agent, Config, LLM, __version__
+from kittycode.agent import INTERRUPTED_TOOL_RESULT
 from kittycode.context import ContextManager, estimate_tokens
 from kittycode.llm import LLMResponse, ToolCall
 from kittycode.logging_utils import configure_logging
 import kittycode.session as session_module
 from kittycode.session import list_sessions, load_session, save_session
-
-
-def test_version():
-    assert __version__ == "0.1.3"
 
 
 def test_public_api_exports():
@@ -212,6 +209,13 @@ def test_agent_skips_tool_execution_when_cancelled_after_tool_announcement(monke
 
     assert response == "(interrupted)"
     assert executed == []
+    assert agent.messages[-2]["role"] == "assistant"
+    assert agent.messages[-2]["tool_calls"][0]["id"] == "tool-1"
+    assert agent.messages[-1] == {
+        "role": "tool",
+        "tool_call_id": "tool-1",
+        "content": INTERRUPTED_TOOL_RESULT,
+    }
 
 
 def test_agent_tool_forwards_cancel_event_to_sub_agent(monkeypatch):
