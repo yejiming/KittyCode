@@ -1,19 +1,108 @@
 """Regression tests for Esc interrupt responsiveness."""
 
+import copy
 import threading
 import time
+from contextlib import contextmanager
 
-from kittycode.agent import INTERRUPTED_TOOL_RESULT
+from kittycode.agent import INTERRUPTED_TOOL_RESULT, repair_incomplete_tool_calls
 from kittycode.cli import _run_agent_with_escape_interrupt
 
 
-class BlockingAgent:
+class RunAwareAgent:
     def __init__(self):
+        self._messages = []
+        self._todos = []
+        self._brief_messages = []
+        self._run_local = threading.local()
+
+    def _current_run_state(self):
+        return getattr(self._run_local, "state", None)
+
+    @property
+    def messages(self):
+        state = self._current_run_state()
+        return state["messages"] if state is not None else self._messages
+
+    @messages.setter
+    def messages(self, value):
+        state = self._current_run_state()
+        if state is not None:
+            state["messages"] = value
+        else:
+            self._messages = value
+
+    @property
+    def todos(self):
+        state = self._current_run_state()
+        return state["todos"] if state is not None else self._todos
+
+    @todos.setter
+    def todos(self, value):
+        state = self._current_run_state()
+        if state is not None:
+            state["todos"] = value
+        else:
+            self._todos = value
+
+    @property
+    def brief_messages(self):
+        state = self._current_run_state()
+        return state["brief_messages"] if state is not None else self._brief_messages
+
+    @brief_messages.setter
+    def brief_messages(self, value):
+        state = self._current_run_state()
+        if state is not None:
+            state["brief_messages"] = value
+        else:
+            self._brief_messages = value
+
+    def begin_run(self):
+        return {
+            "messages": copy.deepcopy(self._messages),
+            "todos": copy.deepcopy(self._todos),
+            "brief_messages": copy.deepcopy(self._brief_messages),
+        }
+
+    @contextmanager
+    def activate_run(self, run_state):
+        previous_state = self._current_run_state()
+        self._run_local.state = run_state
+        try:
+            yield
+        finally:
+            if previous_state is None:
+                try:
+                    del self._run_local.state
+                except AttributeError:
+                    pass
+            else:
+                self._run_local.state = previous_state
+
+    def commit_run(self, run_state):
+        self._messages = copy.deepcopy(run_state["messages"])
+        self._todos = copy.deepcopy(run_state["todos"])
+        self._brief_messages = copy.deepcopy(run_state["brief_messages"])
+
+    def snapshot_run(self, run_state, repair_messages: bool = False):
+        snapshot = {
+            "messages": copy.deepcopy(run_state["messages"]),
+            "todos": copy.deepcopy(run_state["todos"]),
+            "brief_messages": copy.deepcopy(run_state["brief_messages"]),
+        }
+        if "plan" in run_state:
+            snapshot["plan"] = run_state["plan"]
+        if repair_messages:
+            repair_incomplete_tool_calls(snapshot["messages"])
+        return snapshot
+
+
+class BlockingAgent(RunAwareAgent):
+    def __init__(self):
+        super().__init__()
         self.started = threading.Event()
         self.release = threading.Event()
-
-    def fork(self):
-        return self
 
     def chat(self, _user_input, on_token=None, on_tool=None, cancel_event=None):
         self.started.set()
@@ -79,43 +168,41 @@ def test_run_agent_with_escape_interrupt_returns_without_waiting_for_blocked_wor
     assert elapsed < 0.1
 
 
-class ScriptedRunAgent:
-    def __init__(self, label, started=None, release=None, emitted=None):
-        self.label = label
-        self.started = started or threading.Event()
-        self.release = release or threading.Event()
-        self.emitted = emitted if emitted is not None else []
+class SequencedRunAgent(RunAwareAgent):
+    def __init__(self, plans):
+        super().__init__()
+        self._plans = list(plans)
+        self._plan_index = 0
+        self._plan_lock = threading.Lock()
 
-    def fork(self):
-        return self
+    def begin_run(self):
+        run_state = super().begin_run()
+        with self._plan_lock:
+            run_state["plan"] = self._plans[self._plan_index]
+            self.started = run_state["plan"]["started"]
+            self._plan_index += 1
+        return run_state
 
     def chat(self, _user_input, on_token=None, on_tool=None, cancel_event=None):
-        self.started.set()
-        self.release.wait()
+        plan = self._current_run_state()["plan"]
+        plan["started"].set()
+        plan["release"].wait()
+        self.messages.append({"role": "assistant", "content": plan["label"]})
         if on_token is not None:
-            on_token(self.label)
-        self.emitted.append(self.label)
-        return self.label
-
-
-class ForkingAgent:
-    def __init__(self, workers):
-        self._workers = list(workers)
-        self.fork_count = 0
-
-    def fork(self):
-        worker = self._workers[self.fork_count]
-        self.fork_count += 1
-        return worker
+            on_token(plan["label"])
+        return "(interrupted)" if cancel_event is not None and cancel_event.is_set() else plan["label"]
 
 
 def test_interrupted_run_does_not_emit_late_output_or_replace_agent(monkeypatch):
     old_started = threading.Event()
     old_release = threading.Event()
     new_release = threading.Event()
-    old_worker = ScriptedRunAgent("old", started=old_started, release=old_release)
-    new_worker = ScriptedRunAgent("new", release=new_release)
-    agent = ForkingAgent([old_worker, new_worker])
+    agent = SequencedRunAgent(
+        [
+            {"label": "old", "started": old_started, "release": old_release},
+            {"label": "new", "started": threading.Event(), "release": new_release},
+        ]
+    )
     seen = []
     monitor_calls = 0
 
@@ -123,7 +210,7 @@ def test_interrupted_run_does_not_emit_late_output_or_replace_agent(monkeypatch)
         nonlocal monitor_calls
         monitor_calls += 1
         if monitor_calls == 1:
-            return ImmediateInterruptMonitor(cancel_event, old_worker)
+            return ImmediateInterruptMonitor(cancel_event, agent)
         return NeverInterruptMonitor()
 
     monkeypatch.setattr("kittycode.cli._create_escape_monitor", fake_create_escape_monitor)
@@ -156,17 +243,17 @@ def test_interrupted_run_does_not_emit_late_output_or_replace_agent(monkeypatch)
 
     assert second_interrupted is False
     assert second_response == "new"
-    assert second_agent is new_worker
+    assert second_agent is agent
+    assert second_agent.messages == [{"role": "assistant", "content": "new"}]
     assert seen == ["new"]
 
 
-class MessageSnapshotWorker:
+class MessageSnapshotAgent(RunAwareAgent):
     def __init__(self, started=None, release=None):
+        super().__init__()
         self.started = started or threading.Event()
         self.release = release or threading.Event()
-        self.messages = []
-        self.todos = []
-        self.brief_messages = []
+        self.messages = [{"role": "assistant", "content": "existing context"}]
 
     def chat(self, _user_input, on_token=None, on_tool=None, cancel_event=None):
         self.messages.append({"role": "user", "content": _user_input})
@@ -200,29 +287,14 @@ class MessageSnapshotWorker:
         return "(interrupted)" if cancel_event is not None and cancel_event.is_set() else "done"
 
 
-class SnapshotParentAgent:
-    def __init__(self, worker):
-        self.worker = worker
-        self.messages = [{"role": "assistant", "content": "existing context"}]
-        self.todos = []
-        self.brief_messages = []
-
-    def fork(self):
-        self.worker.messages = list(self.messages)
-        self.worker.todos = list(self.todos)
-        self.worker.brief_messages = list(self.brief_messages)
-        return self.worker
-
-
-def test_interrupted_run_merges_partial_tool_call_messages_back_with_interrupt_tool_result(monkeypatch):
+def test_interrupted_run_commits_partial_tool_call_snapshot_without_late_mutations(monkeypatch):
     started = threading.Event()
     release = threading.Event()
-    worker = MessageSnapshotWorker(started=started, release=release)
-    agent = SnapshotParentAgent(worker)
+    agent = MessageSnapshotAgent(started=started, release=release)
     seen = []
 
     def fake_create_escape_monitor(cancel_event, stream=None):
-        return ImmediateInterruptMonitor(cancel_event, worker)
+        return ImmediateInterruptMonitor(cancel_event, agent)
 
     monkeypatch.setattr("kittycode.cli._create_escape_monitor", fake_create_escape_monitor)
 

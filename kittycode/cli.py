@@ -1,7 +1,6 @@
 """Interactive CLI for KittyCode."""
 
 import argparse
-import copy
 import inspect
 import os
 import queue
@@ -29,7 +28,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from . import __version__
-from .agent import Agent, repair_incomplete_tool_calls
+from .agent import Agent
 from .config import CONFIG_PATH, Config
 from .interrupts import CancellationRequested
 from .llm import LLM
@@ -69,23 +68,6 @@ _BUILTIN_COMMANDS = {
     "/sessions": "List saved sessions",
     "/quit": "Exit KittyCode",
 }
-
-
-def _merge_completed_worker_state(agent, worker_agent):
-    if worker_agent is agent:
-        return agent
-
-    if hasattr(agent, "messages") and hasattr(worker_agent, "messages"):
-        merged_messages = copy.deepcopy(getattr(worker_agent, "messages"))
-        repair_incomplete_tool_calls(merged_messages)
-        setattr(agent, "messages", merged_messages)
-
-    for attr in ("todos", "brief_messages"):
-        if hasattr(agent, attr) and hasattr(worker_agent, attr):
-            setattr(agent, attr, copy.deepcopy(getattr(worker_agent, attr)))
-    return agent
-
-
 class SlashCommandCompleter(Completer):
     def __init__(self, command_provider):
         self.command_provider = command_provider
@@ -822,7 +804,7 @@ def _run_agent_with_escape_interrupt(
     cancel_event = threading.Event()
     callback_gate = threading.Event()
     callback_gate.set()
-    worker_agent = agent.fork() if hasattr(agent, "fork") else agent
+    run = agent.begin_run() if hasattr(agent, "begin_run") else None
     pending_questions: queue.Queue[tuple[list[dict], dict, threading.Event]] = queue.Queue()
     result: dict[str, str] = {}
     error: dict[str, BaseException] = {}
@@ -839,24 +821,39 @@ def _run_agent_with_escape_interrupt(
 
     def worker():
         try:
-            worker_agent.ask_user_handler = _make_ask_user_bridge(
-                pending_questions,
-                cancel_event,
-                ask_user,
-            )
-            worker_agent.on_brief_message = _guard(on_brief)
-            chat_kwargs = {
-                "on_token": _guard(on_token),
-                "on_tool": _guard(on_tool),
-                "cancel_event": cancel_event,
-            }
-            if "on_tool_output" in inspect.signature(worker_agent.chat).parameters:
-                chat_kwargs["on_tool_output"] = _guard(on_tool_output)
+            if run is not None and hasattr(agent, "activate_run"):
+                with agent.activate_run(run):
+                    agent.ask_user_handler = _make_ask_user_bridge(
+                        pending_questions,
+                        cancel_event,
+                        ask_user,
+                    )
+                    agent.on_brief_message = _guard(on_brief)
+                    chat_kwargs = {
+                        "on_token": _guard(on_token),
+                        "on_tool": _guard(on_tool),
+                        "cancel_event": cancel_event,
+                    }
+                    if "on_tool_output" in inspect.signature(agent.chat).parameters:
+                        chat_kwargs["on_tool_output"] = _guard(on_tool_output)
 
-            result["response"] = worker_agent.chat(
-                user_input,
-                **chat_kwargs,
-            )
+                    result["response"] = agent.chat(
+                        user_input,
+                        **chat_kwargs,
+                    )
+            else:
+                chat_kwargs = {
+                    "on_token": _guard(on_token),
+                    "on_tool": _guard(on_tool),
+                    "cancel_event": cancel_event,
+                }
+                if "on_tool_output" in inspect.signature(agent.chat).parameters:
+                    chat_kwargs["on_tool_output"] = _guard(on_tool_output)
+
+                result["response"] = agent.chat(
+                    user_input,
+                    **chat_kwargs,
+                )
         except BaseException as exc:  # pragma: no cover - surfaced in main thread
             error["exc"] = exc
 
@@ -879,9 +876,13 @@ def _run_agent_with_escape_interrupt(
                 thread.join(0.05)
 
     if interrupted and thread.is_alive():
+        interrupted_run = None
+        if run is not None and hasattr(agent, "snapshot_run") and hasattr(agent, "commit_run"):
+            interrupted_run = agent.snapshot_run(run, repair_messages=True)
         callback_gate.clear()
         _cancel_pending_user_question_requests(pending_questions)
-        _merge_completed_worker_state(agent, worker_agent)
+        if interrupted_run is not None:
+            agent.commit_run(interrupted_run)
         return "(interrupted)", True, agent
 
     _service_user_question_requests(pending_questions, ask_user, cancel_event)
@@ -891,8 +892,11 @@ def _run_agent_with_escape_interrupt(
     if "exc" in error:
         raise error["exc"]
 
+    if run is not None and hasattr(agent, "commit_run"):
+        agent.commit_run(run)
+
     was_interrupted = interrupted or cancel_event.is_set() or result.get("response") == "(interrupted)"
-    return result.get("response", ""), was_interrupted, agent if was_interrupted else worker_agent
+    return result.get("response", ""), was_interrupted, agent
 
 
 def _make_ask_user_bridge(pending_questions, cancel_event, ask_user):
