@@ -22,9 +22,10 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import PromptSession, print_formatted_text
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 
 from . import __version__
@@ -168,20 +169,23 @@ def main():
 def _run_once(agent: Agent, prompt: str):
     streamed: list[str] = []
     live_tool_output = _LiveToolOutputRenderer(_emit_raw_terminal)
+    assistant_stream = _MarkdownStreamRenderer(_emit_raw_terminal)
 
     def on_token(token):
         streamed.append(token)
-        print(token, end="", flush=True)
+        assistant_stream.write(token)
 
     def on_tool(name, kwargs):
+        assistant_stream.finish()
         live_tool_output.finish()
-        console.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
+        _show_tool_call(console, name, kwargs)
 
     def on_tool_output(name, text):
         if name == "bash":
             live_tool_output.append(text)
 
     def on_brief(payload):
+        assistant_stream.finish()
         live_tool_output.finish()
         console.print(_render_brief_message(payload))
         for line in _render_brief_attachments(payload):
@@ -191,11 +195,10 @@ def _run_once(agent: Agent, prompt: str):
     agent.ask_user_handler = _non_interactive_ask_user
 
     response = agent.chat(prompt, on_token=on_token, on_tool=on_tool, on_tool_output=on_tool_output)
+    assistant_stream.finish()
     live_tool_output.finish()
-    if streamed:
-        print()
-    else:
-        console.print(Markdown(response))
+    if not streamed:
+        _write_assistant_response(_emit_raw_terminal, response)
 
 
 def _repl(agent: Agent, config: Config):
@@ -297,20 +300,23 @@ def _repl(agent: Agent, config: Config):
             pending_skill = None
 
         streamed: list[str] = []
+        assistant_stream = _MarkdownStreamRenderer(_emit_raw_terminal)
 
         def on_token(token):
             streamed.append(token)
-            input_reader.write(token)
+            assistant_stream.write(token)
 
         def on_tool(name, kwargs):
+            assistant_stream.finish()
             input_reader.finish_live_tool_output()
-            input_reader.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
+            _show_tool_call(input_reader, name, kwargs)
 
         def on_tool_output(name, text):
             if name == "bash":
                 input_reader.append_live_tool_output(text)
 
         def on_brief(payload):
+            assistant_stream.finish()
             input_reader.finish_live_tool_output()
             input_reader.print(_render_brief_message(payload))
             for line in _render_brief_attachments(payload):
@@ -327,17 +333,18 @@ def _repl(agent: Agent, config: Config):
                 on_brief=on_brief,
             )
             agent = next_agent
+            assistant_stream.finish()
             input_reader.finish_live_tool_output()
-            if streamed:
-                input_reader.write("\n")
             if interrupted or response == "(interrupted)":
                 input_reader.print("[yellow]Interrupted.[/yellow]")
             elif not streamed:
-                input_reader.print(Markdown(response))
+                _write_assistant_response(input_reader.write, response)
         except KeyboardInterrupt:
+            assistant_stream.finish()
             input_reader.finish_live_tool_output()
             input_reader.print("\n[yellow]Interrupted.[/yellow]")
         except Exception as exc:
+            assistant_stream.finish()
             input_reader.finish_live_tool_output()
             input_reader.print(f"\n[red]Error: {exc}[/red]")
 
@@ -561,8 +568,8 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return result
 
 
-def _brief(kwargs: dict, maxlen: int = 400) -> str:
-    summary = ", ".join(f"{key}={repr(value)[:200]}" for key, value in kwargs.items())
+def _brief(kwargs: dict, maxlen: int = 80) -> str:
+    summary = ", ".join(f"{key}={repr(value)[:40]}" for key, value in kwargs.items())
     return summary[:maxlen] + ("..." if len(summary) > maxlen else "")
 
 
@@ -570,6 +577,149 @@ def _format_tool_call(name: str, kwargs: dict) -> str:
     if name == "todo_write":
         return f"{name}({repr(kwargs)})"
     return f"{name}({_brief(kwargs)})"
+
+
+def _format_tool_call_details(name: str, kwargs: dict) -> list[tuple[str, object]]:
+    details: list[tuple[str, object]] = [("tool", name)]
+    details.extend(_flatten_tool_call_arguments(kwargs))
+    return details
+
+
+def _flatten_tool_call_arguments(value, prefix: str = "") -> list[tuple[str, object]]:
+    rows: list[tuple[str, object]] = []
+    if isinstance(value, dict):
+        if not value:
+            rows.append((prefix or "arguments", "{}"))
+            return rows
+        for key, nested_value in value.items():
+            next_prefix = f"{prefix}.{key}" if prefix else str(key)
+            rows.extend(_flatten_tool_call_arguments(nested_value, next_prefix))
+        return rows
+    if isinstance(value, list):
+        if not value:
+            rows.append((prefix or "arguments", "[]"))
+            return rows
+        for index, nested_value in enumerate(value):
+            next_prefix = f"{prefix}[{index}]" if prefix else f"[{index}]"
+            rows.extend(_flatten_tool_call_arguments(nested_value, next_prefix))
+        return rows
+    rows.append((prefix or "arguments", value))
+    return rows
+
+
+def _render_tool_call_value(value) -> Text:
+    if value is None:
+        return Text("null", style="dim")
+    if isinstance(value, bool):
+        return Text("true" if value else "false", style="bold green" if value else "bold yellow")
+    if isinstance(value, (int, float)):
+        return Text(str(value), style="bold cyan")
+    if isinstance(value, str) and value in {"{}", "[]"}:
+        return Text(value, style="dim")
+    if isinstance(value, str):
+        return Text(value, style="green")
+    return Text(str(value), style="white")
+
+
+def _render_tool_call_details(name: str, kwargs: dict):
+    details = _format_tool_call_details(name, kwargs)
+    summary = Table.grid(expand=False, padding=(0, 1))
+    summary.add_column(style="bold cyan", no_wrap=True)
+    summary.add_column(style="white")
+
+    body = Table.grid(expand=True, padding=(0, 1))
+    body.add_column(style="bold cyan", no_wrap=True)
+    body.add_column(style="white")
+    for path, value in details[1:]:
+        body.add_row(path, _render_tool_call_value(value))
+
+    content = Group(
+        summary,
+        Text("Arguments", style="bold magenta"),
+        body if details[1:] else Text("No arguments", style="dim"),
+    )
+    return Panel(
+        content,
+        title=f"Tool Call: {name}",
+        border_style="dim cyan",
+    )
+
+
+def _show_tool_call(io, name: str, kwargs: dict) -> None:
+    io.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
+    io.print(_render_tool_call_details(name, kwargs))
+
+
+def _write_assistant_response(write, response: str) -> None:
+    write(_render_markdown_as_ansi(response))
+
+
+def _render_markdown_as_ansi(text: str) -> str:
+    if not text:
+        return ""
+    rendered = _render_as_ansi(Markdown(text))
+    return rendered if rendered.endswith("\n") else f"{rendered}\n"
+
+
+def _rendered_line_count(text: str) -> int:
+    if not text:
+        return 0
+    return text.count("\n") if text.endswith("\n") else text.count("\n") + 1
+
+
+def _rewind_and_clear_lines(line_count: int) -> str:
+    if line_count <= 0:
+        return ""
+    parts = [f"\x1b[{line_count}A"]
+    for index in range(line_count):
+        parts.append("\r\x1b[2K")
+        if index < line_count - 1:
+            parts.append("\x1b[1B")
+    if line_count > 1:
+        parts.append(f"\x1b[{line_count - 1}A")
+    parts.append("\r")
+    return "".join(parts)
+
+
+class _MarkdownStreamRenderer:
+    def __init__(self, emit, render=None, refresh_interval: float = 0.05, now=None):
+        self.emit = emit
+        self.render = render or _render_markdown_as_ansi
+        self.refresh_interval = refresh_interval
+        self._now = now or time.monotonic
+        self._buffer = ""
+        self._rendered_buffer = ""
+        self._rendered_line_count = 0
+        self._last_emit_at: float | None = None
+
+    def write(self, text: str) -> None:
+        if not text:
+            return
+        self._buffer += text
+        current_time = self._now()
+        if self._last_emit_at is not None and current_time - self._last_emit_at < self.refresh_interval:
+            return
+        self._render_current()
+        self._last_emit_at = current_time
+
+    def finish(self) -> None:
+        if self._buffer and self._buffer != self._rendered_buffer:
+            self._render_current()
+        self._reset()
+
+    def _render_current(self) -> None:
+        rendered = self.render(self._buffer)
+        clear = _rewind_and_clear_lines(self._rendered_line_count)
+        if clear or rendered:
+            self.emit(f"{clear}{rendered}")
+        self._rendered_buffer = self._buffer
+        self._rendered_line_count = _rendered_line_count(rendered)
+
+    def _reset(self) -> None:
+        self._buffer = ""
+        self._rendered_buffer = ""
+        self._rendered_line_count = 0
+        self._last_emit_at = None
 
 
 def _render_startup_header(config: Config, width: int | None = None):
@@ -586,12 +736,6 @@ def _render_startup_header(config: Config, width: int | None = None):
     right_lines = _startup_right_box_lines(config, available_right, target_height=len(left_lines))
     lines = _merge_columns(left_lines, right_lines, left_width, gap)
     return Text.from_ansi("\n".join(lines))
-
-
-def _pixel_cat_banner() -> str:
-    return "\n".join(
-        _PIXEL_CAT_ART.splitlines() + [f"{_ACCENT}{_BOLD}KittyCode{_RESET} v{__version__}"]
-    )
 
 
 def _startup_left_box_lines(config: Config) -> list[str]:

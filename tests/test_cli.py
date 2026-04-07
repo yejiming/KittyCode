@@ -3,36 +3,35 @@
 import re
 
 from rich.console import Console
+from rich.panel import Panel
 
 from kittycode import __version__
 from kittycode.cli import (
     _BOLD,
+    _MarkdownStreamRenderer,
     _PIXEL_CAT_ART,
     _RESET,
     _brief,
     _build_input_reader,
+    _format_tool_call_details,
     _format_tool_call,
     _format_question_prompt,
     _merge_columns,
     _parse_question_answer,
-    _pixel_cat_banner,
     _render_brief_attachments,
+    _render_markdown_as_ansi,
+    _render_tool_call_details,
     _render_startup_header,
+    _rewind_and_clear_lines,
+    _show_tool_call,
     _show_help,
     _startup_right_box_lines,
     _startup_left_box_lines,
+    _write_assistant_response,
 )
 from kittycode.config import Config
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-
-
-def test_pixel_cat_banner_contains_ansi_blocks():
-    banner = _pixel_cat_banner()
-
-    assert "\x1b[" in banner
-    assert " /\\_/\\" in banner
-    assert "KittyCode" in banner
 
 
 def test_pixel_cat_art_has_cat_ear_silhouette():
@@ -220,8 +219,103 @@ def test_format_tool_call_shows_full_todo_write_payload():
     assert "..." not in rendered
 
 
-def test_brief_uses_400_character_limit_for_non_todo_tools():
-    summary = _brief({f"payload_{i}": "x" * 60 for i in range(20)})
+def test_format_tool_call_details_keeps_full_payload():
+    long_value = "retain-full-payload-" * 30
 
-    assert len(summary) == 403
-    assert summary.endswith("...")
+    rendered = _format_tool_call_details(
+        "web_fetch",
+        {
+            "url": "https://example.com",
+            "prompt": long_value,
+        },
+    )
+
+    assert rendered[0] == ("tool", "web_fetch")
+    assert ("url", "https://example.com") in rendered
+    assert ("prompt", long_value) in rendered
+
+
+def test_render_tool_call_details_returns_panel_with_full_arguments():
+    panel = _render_tool_call_details(
+        "write_file",
+        {
+            "file_path": "/tmp/demo.txt",
+            "content": "full body",
+        },
+    )
+    console = Console(record=True, width=200)
+
+    console.print(panel)
+    output = console.export_text()
+
+    assert isinstance(panel, Panel)
+    assert "Tool Call: write_file" in output
+    assert "Tool" in output
+    assert "file_path" in output
+    assert "/tmp/demo.txt" in output
+    assert "content" in output
+    assert "full body" in output
+    assert '"file_path"' not in output
+
+
+def test_show_tool_call_prints_summary_then_detail_panel():
+    class FakeIO:
+        def __init__(self):
+            self.values = []
+
+        def print(self, value):
+            self.values.append(value)
+
+    io = FakeIO()
+
+    _show_tool_call(io, "grep", {"pattern": "needle", "path": "src"})
+
+    assert io.values[0].startswith("\n[dim]> grep(")
+    assert isinstance(io.values[1], Panel)
+
+
+def test_write_assistant_response_preserves_ansi_and_appends_newline():
+    writes = []
+
+    _write_assistant_response(writes.append, "**hello**")
+
+    assert len(writes) == 1
+    assert "hello" in ANSI_RE.sub("", writes[0])
+    assert writes[0].endswith("\n")
+
+
+def test_render_markdown_as_ansi_renders_markdown_content():
+    rendered = _render_markdown_as_ansi("# Title\n\n**bold**")
+
+    plain = ANSI_RE.sub("", rendered)
+
+    assert "Title" in plain
+    assert "bold" in plain
+    assert rendered.endswith("\n")
+
+
+def test_rewind_and_clear_lines_returns_terminal_control_sequence():
+    sequence = _rewind_and_clear_lines(2)
+
+    assert sequence.startswith("\x1b[2A")
+    assert "\r\x1b[2K" in sequence
+    assert sequence.endswith("\r")
+
+
+def test_markdown_stream_renderer_rewrites_rendered_block():
+    writes = []
+    clock = iter([0.0, 1.0])
+    writer = _MarkdownStreamRenderer(
+        writes.append,
+        render=lambda text: f"<{text}>\n",
+        refresh_interval=0.0,
+        now=lambda: next(clock),
+    )
+
+    writer.write("hello")
+    writer.write(" world")
+    writer.finish()
+
+    assert writes[0] == "<hello>\n"
+    assert writes[1].startswith("\x1b[1A")
+    assert writes[1].endswith("<hello world>\n")

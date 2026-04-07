@@ -43,7 +43,7 @@ class WebSearchTool(Tool):
                 "description": "Timeout in seconds (default 20)",
             },
         },
-        "required": ["query"],
+        "required": ["query", "timeout"],
     }
 
     def execute(

@@ -39,7 +39,7 @@ class WebFetchTool(Tool):
                 "description": "Timeout in seconds (default 20)",
             },
         },
-        "required": ["url", "prompt"],
+        "required": ["url", "prompt", "timeout"],
     }
 
     _parent_agent = None
