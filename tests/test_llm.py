@@ -11,6 +11,7 @@ from kittycode.llm import (
     LLM,
     _anthropic_message_to_response,
     _extract_system_message,
+    _openai_stream_to_response,
     _parse_openai_tool_calls,
     _openai_completion_to_response,
     _sleep_until_retry_or_cancel,
@@ -143,27 +144,57 @@ def test_parse_openai_tool_calls_logs_raw_tool_call_and_arguments():
     assert '"content": ' in logs
 
 
-def test_openai_completion_to_response_reads_non_stream_tool_calls():
-    response = _openai_completion_to_response(
-        SimpleNamespace(
-            choices=[
-                SimpleNamespace(
-                    message=SimpleNamespace(
-                        content="done",
-                        tool_calls=[
-                            SimpleNamespace(
-                                id="call_1",
-                                function=SimpleNamespace(
-                                    name="write_file",
-                                    arguments='{"file_path": "/tmp/a.txt", "content": "hello"}',
-                                ),
-                            )
-                        ],
+def test_openai_stream_to_response_reads_streamed_tool_calls():
+    seen = []
+    response = _openai_stream_to_response(
+        [
+            SimpleNamespace(
+                usage=None,
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="do", tool_calls=None))],
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content="ne",
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id="call_1",
+                                    function=SimpleNamespace(
+                                        name="write_file",
+                                        arguments='{"file_path": "/tmp/a.txt", ',
+                                    ),
+                                )
+                            ],
+                        )
                     )
-                )
-            ],
-            usage=SimpleNamespace(prompt_tokens=12, completion_tokens=34),
-        )
+                ],
+            ),
+            SimpleNamespace(
+                usage=None,
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[
+                                SimpleNamespace(
+                                    index=0,
+                                    id=None,
+                                    function=SimpleNamespace(name=None, arguments='"content": "hello"}'),
+                                )
+                            ],
+                        )
+                    )
+                ],
+            ),
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=12, completion_tokens=34),
+                choices=[],
+            ),
+        ],
+        on_token=seen.append,
     )
 
     assert response.content == "done"
@@ -171,27 +202,55 @@ def test_openai_completion_to_response_reads_non_stream_tool_calls():
     assert response.tool_calls[0].arguments == {"file_path": "/tmp/a.txt", "content": "hello"}
     assert response.prompt_tokens == 12
     assert response.completion_tokens == 34
+    assert seen == ["do", "ne"]
 
 
-def test_chat_openai_uses_non_stream_requests(monkeypatch):
+def test_chat_openai_uses_streaming_requests(monkeypatch):
     llm = LLM(model="gpt-4o", api_key="test-key", interface="openai")
     captured = {}
 
     def fake_call_with_retry(params, max_retries=3, cancel_event=None):
         captured.update(params)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="", tool_calls=[]))],
-            usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
-        )
+        return [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="", tool_calls=[]))],
+            )
+        ]
 
     monkeypatch.setattr(llm, "_call_with_retry", fake_call_with_retry)
 
     response = llm._chat_openai(messages=[{"role": "user", "content": "hi"}], tools=[])
 
-    assert captured["stream"] is False
-    assert "stream_options" not in captured
+    assert captured["stream"] is True
+    assert captured["stream_options"] == {"include_usage": True}
     assert response.prompt_tokens == 1
     assert response.completion_tokens == 2
+
+
+def test_chat_openai_retries_without_stream_options_when_backend_rejects_it(monkeypatch):
+    llm = LLM(model="gpt-4o", api_key="test-key", interface="openai")
+    calls = []
+
+    def fake_call_with_retry(params, max_retries=3, cancel_event=None):
+        calls.append(dict(params))
+        if "stream_options" in params:
+            raise TypeError("unsupported stream_options")
+        return [
+            SimpleNamespace(
+                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+                choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", tool_calls=[]))],
+            )
+        ]
+
+    monkeypatch.setattr(llm, "_call_with_retry", fake_call_with_retry)
+
+    response = llm._chat_openai(messages=[{"role": "user", "content": "hi"}])
+
+    assert len(calls) == 2
+    assert calls[0]["stream_options"] == {"include_usage": True}
+    assert "stream_options" not in calls[1]
+    assert response.content == "ok"
 
 
 def test_chat_anthropic_uses_streaming_requests(monkeypatch):

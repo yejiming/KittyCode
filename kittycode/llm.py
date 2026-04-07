@@ -99,18 +99,27 @@ class LLM:
         params: dict = {
             "model": self.model,
             "messages": messages,
-            "stream": False,
+            "stream": True,
             **self.extra,
         }
         if tools:
             params["tools"] = tools
 
-        completion = self._call_with_retry(params, cancel_event=cancel_event)
+        stream = self._call_openai_stream(params, cancel_event=cancel_event)
         _raise_if_cancelled(cancel_event)
-        response = _openai_completion_to_response(completion, on_token=on_token)
+        response = _openai_stream_to_response(stream, on_token=on_token, cancel_event=cancel_event)
         self.total_prompt_tokens += response.prompt_tokens
         self.total_completion_tokens += response.completion_tokens
         return response
+
+    def _call_openai_stream(self, params: dict, cancel_event=None):
+        stream_params = {**params, "stream_options": {"include_usage": True}}
+        try:
+            return self._call_with_retry(stream_params, cancel_event=cancel_event)
+        except CancellationRequested:
+            raise
+        except Exception:
+            return self._call_with_retry(params, cancel_event=cancel_event)
 
     def _chat_anthropic(
         self,
@@ -195,6 +204,62 @@ def _parse_openai_tool_calls(tool_call_map: dict[int, dict]) -> list[ToolCall]:
             ToolCall(id=raw.get("id", ""), name=raw.get("name", ""), arguments=args)
         )
     return parsed_tool_calls
+
+
+def _openai_stream_to_response(stream, on_token=None, cancel_event=None) -> LLMResponse:
+    content_parts: list[str] = []
+    tool_call_map: dict[int, dict] = {}
+    prompt_tokens = 0
+    completion_tokens = 0
+
+    for chunk in stream:
+        _raise_if_cancelled(cancel_event)
+
+        usage = getattr(chunk, "usage", None)
+        if usage is not None:
+            prompt_tokens = getattr(usage, "prompt_tokens", prompt_tokens) or prompt_tokens
+            completion_tokens = getattr(usage, "completion_tokens", completion_tokens) or completion_tokens
+
+        choices = getattr(chunk, "choices", None)
+        if not choices:
+            continue
+
+        delta = getattr(choices[0], "delta", None)
+        if delta is None:
+            continue
+
+        content = getattr(delta, "content", None)
+        if content:
+            content_parts.append(content)
+            if on_token:
+                on_token(content)
+
+        for tool_call_delta in getattr(delta, "tool_calls", None) or []:
+            index = getattr(tool_call_delta, "index", 0)
+            raw = tool_call_map.setdefault(index, {"id": "", "name": "", "args": ""})
+
+            tool_call_id = getattr(tool_call_delta, "id", None)
+            if tool_call_id:
+                raw["id"] = tool_call_id
+
+            function = getattr(tool_call_delta, "function", None)
+            if function is None:
+                continue
+
+            name = getattr(function, "name", None)
+            if name:
+                raw["name"] = name
+
+            arguments = getattr(function, "arguments", None)
+            if arguments:
+                raw["args"] += arguments
+
+    return LLMResponse(
+        content="".join(content_parts),
+        tool_calls=_parse_openai_tool_calls(tool_call_map),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 def _openai_completion_to_response(completion, on_token=None) -> LLMResponse:
