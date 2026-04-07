@@ -3,6 +3,7 @@
 import threading
 import time
 
+from kittycode.agent import INTERRUPTED_TOOL_RESULT
 from kittycode.cli import _run_agent_with_escape_interrupt
 
 
@@ -164,6 +165,8 @@ class MessageSnapshotWorker:
         self.started = started or threading.Event()
         self.release = release or threading.Event()
         self.messages = []
+        self.todos = []
+        self.brief_messages = []
 
     def chat(self, _user_input, on_token=None, on_tool=None, cancel_event=None):
         self.messages.append({"role": "user", "content": _user_input})
@@ -180,15 +183,17 @@ class MessageSnapshotWorker:
                 ],
             }
         )
+        self.todos.append({"content": "keep interrupted todo"})
+        self.brief_messages.append({"message": "keep interrupted brief", "attachments": []})
+        self.started.set()
+        self.release.wait()
         self.messages.append(
             {
                 "role": "tool",
                 "tool_call_id": "call_1",
-                "content": "partial tool result",
+                "content": "late tool result",
             }
         )
-        self.started.set()
-        self.release.wait()
         self.messages.append({"role": "assistant", "content": "late message"})
         if on_token is not None:
             on_token("late token")
@@ -198,14 +203,18 @@ class MessageSnapshotWorker:
 class SnapshotParentAgent:
     def __init__(self, worker):
         self.worker = worker
-        self.messages = []
+        self.messages = [{"role": "assistant", "content": "existing context"}]
+        self.todos = []
+        self.brief_messages = []
 
     def fork(self):
         self.worker.messages = list(self.messages)
+        self.worker.todos = list(self.todos)
+        self.worker.brief_messages = list(self.brief_messages)
         return self.worker
 
 
-def test_interrupted_run_merges_completed_worker_messages_without_late_mutations(monkeypatch):
+def test_interrupted_run_merges_partial_tool_call_messages_back_with_interrupt_tool_result(monkeypatch):
     started = threading.Event()
     release = threading.Event()
     worker = MessageSnapshotWorker(started=started, release=release)
@@ -228,6 +237,7 @@ def test_interrupted_run_merges_completed_worker_messages_without_late_mutations
         assert response == "(interrupted)"
         assert returned_agent is agent
         assert returned_agent.messages == [
+            {"role": "assistant", "content": "existing context"},
             {"role": "user", "content": "hello"},
             {
                 "role": "assistant",
@@ -243,9 +253,11 @@ def test_interrupted_run_merges_completed_worker_messages_without_late_mutations
             {
                 "role": "tool",
                 "tool_call_id": "call_1",
-                "content": "partial tool result",
+                "content": INTERRUPTED_TOOL_RESULT,
             },
         ]
+        assert returned_agent.todos == [{"content": "keep interrupted todo"}]
+        assert returned_agent.brief_messages == [{"message": "keep interrupted brief", "attachments": []}]
 
         release.set()
         time.sleep(0.05)
@@ -254,6 +266,7 @@ def test_interrupted_run_merges_completed_worker_messages_without_late_mutations
         release.set()
 
     assert returned_agent.messages == [
+        {"role": "assistant", "content": "existing context"},
         {"role": "user", "content": "hello"},
         {
             "role": "assistant",
@@ -269,7 +282,9 @@ def test_interrupted_run_merges_completed_worker_messages_without_late_mutations
         {
             "role": "tool",
             "tool_call_id": "call_1",
-            "content": "partial tool result",
+            "content": INTERRUPTED_TOOL_RESULT,
         },
     ]
+    assert returned_agent.todos == [{"content": "keep interrupted todo"}]
+    assert returned_agent.brief_messages == [{"message": "keep interrupted brief", "attachments": []}]
     assert seen == []

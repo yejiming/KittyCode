@@ -23,6 +23,44 @@ from .tools.agent import AgentTool
 from .tools.base import Tool
 
 
+INTERRUPTED_TOOL_RESULT = "Error: tool execution interrupted before a result was produced."
+
+
+def repair_incomplete_tool_calls(messages: list[dict]) -> None:
+    """Append synthetic tool results for assistant tool calls that never received one."""
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        tool_calls = message.get("tool_calls") or []
+        if message.get("role") != "assistant" or not tool_calls:
+            index += 1
+            continue
+
+        expected_ids = [tool_call.get("id") for tool_call in tool_calls if tool_call.get("id")]
+        insert_at = index + 1
+        seen_ids: list[str] = []
+
+        while insert_at < len(messages) and messages[insert_at].get("role") == "tool":
+            tool_call_id = messages[insert_at].get("tool_call_id")
+            if tool_call_id:
+                seen_ids.append(tool_call_id)
+            insert_at += 1
+
+        missing_ids = [tool_call_id for tool_call_id in expected_ids if tool_call_id not in seen_ids]
+        if missing_ids:
+            messages[insert_at:insert_at] = [
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": INTERRUPTED_TOOL_RESULT,
+                }
+                for tool_call_id in missing_ids
+            ]
+            insert_at += len(missing_ids)
+
+        index = insert_at
+
+
 class Agent:
     def __init__(
         self,
@@ -129,6 +167,7 @@ class Agent:
 
             return "(reached maximum tool-call rounds)"
         except CancellationRequested:
+            repair_incomplete_tool_calls(self.messages)
             return "(interrupted)"
 
     def _exec_tool(self, tool_call, cancel_event=None, on_output=None) -> str:
