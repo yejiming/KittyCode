@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kittycode"
-version = "0.1.4"
-description = "Minimal AI coding agent with a simple tool loop and skill support."
+version = "0.2.0"
+description = "A minimal, hackable AI coding agent with a composable tool loop and modular skills."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -29,7 +29,7 @@ packages = ["kittycode"]
 dev = ["pytest>=7.0"]
 
 [project.scripts]
-kittycode = "kittycode.cli:main"
+kittycode = "kittycode.main:main"
 
 [project.urls]
 Homepage = "https://github.com/yejiming/KittyCode"

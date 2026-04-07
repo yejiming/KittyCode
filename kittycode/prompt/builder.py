@@ -1,7 +1,10 @@
 """System prompt builder."""
 
+from __future__ import annotations
+
 import os
 import platform
+import sys
 import textwrap
 from pathlib import Path
 
@@ -102,7 +105,12 @@ def _format_tool_entry(tool) -> str:
 
 
 def _read_agents_doc() -> str:
+    agents_doc = AGENTS_DOC
+    package_module = sys.modules.get("kittycode.prompt")
+    if package_module is not None:
+        agents_doc = getattr(package_module, "AGENTS_DOC", agents_doc)
+
     try:
-        return AGENTS_DOC.read_text(errors="replace").strip()
+        return agents_doc.read_text(errors="replace").strip()
     except OSError:
         return ""

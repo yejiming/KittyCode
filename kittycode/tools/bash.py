@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 
-from ..interrupts import CancellationRequested
+from ..runtime.interrupts import CancellationRequested
 
 from .base import Tool
 

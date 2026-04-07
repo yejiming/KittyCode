@@ -4,6 +4,7 @@ import json
 import logging
 import types
 import threading
+import importlib
 
 import pytest
 
@@ -21,6 +22,33 @@ def test_public_api_exports():
     assert LLM is not None
     assert Config is not None
     assert len(ALL_TOOLS) == 13
+
+
+def test_package_roots_reexport_from_dedicated_modules():
+    config_pkg = importlib.import_module("kittycode.config")
+    config_impl = importlib.import_module("kittycode.config.settings")
+    llm_pkg = importlib.import_module("kittycode.llm")
+    llm_impl = importlib.import_module("kittycode.llm.provider")
+    prompt_pkg = importlib.import_module("kittycode.prompt")
+    prompt_impl = importlib.import_module("kittycode.prompt.builder")
+    skills_pkg = importlib.import_module("kittycode.skills")
+    skills_impl = importlib.import_module("kittycode.skills.discovery")
+
+    assert config_pkg.Config is config_impl.Config
+    assert config_pkg.CONFIG_PATH == config_impl.CONFIG_PATH
+
+    assert llm_pkg.LLM is llm_impl.LLM
+    assert llm_pkg.LLMResponse is llm_impl.LLMResponse
+    assert llm_pkg.ToolCall is llm_impl.ToolCall
+    assert llm_pkg._openai_stream_to_response is llm_impl._openai_stream_to_response
+
+    assert prompt_pkg.system_prompt is prompt_impl.system_prompt
+    assert prompt_pkg.user_prompt is prompt_impl.user_prompt
+    assert prompt_pkg.AGENTS_DOC == prompt_impl.AGENTS_DOC
+
+    assert skills_pkg.SkillDefinition is skills_impl.SkillDefinition
+    assert skills_pkg.load_skills is skills_impl.load_skills
+    assert skills_pkg.SKILLS_DIR == skills_impl.SKILLS_DIR
 
 
 def test_config_from_file(tmp_path):

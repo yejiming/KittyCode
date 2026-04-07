@@ -16,14 +16,13 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from ..llm import LLM
+from ..prompt import system_prompt, user_prompt
+from ..skills import load_skills
+from ..tools import create_tool_instances, get_tool
+from ..tools.base import Tool
 from .context import ContextManager
 from .interrupts import CancellationRequested
-from .llm import LLM
-from .prompt import system_prompt, user_prompt
-from .skills import load_skills
-from .tools import create_tool_instances, get_tool
-from .tools.agent import AgentTool
-from .tools.base import Tool
 
 
 INTERRUPTED_TOOL_RESULT = "Error: tool execution interrupted before a result was produced."

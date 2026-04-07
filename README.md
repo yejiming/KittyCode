@@ -94,7 +94,7 @@ Expected layout:
 		other-files...
 ```
 
-KittyCode reads the leading `name` and `description` fields from each `SKILL.md`, keeps the resulting skill list in memory, and inserts the list into the system prompt at the start of every round. The prompt includes:
+KittyCode reads the leading `name` and `description` fields from each `SKILL.md`, keeps the resulting skill list in memory, and appends that list to each user turn inside a `<system-reminder>` block. The reminder includes:
 
 - `name`
 - `description`
@@ -102,7 +102,7 @@ KittyCode reads the leading `name` and `description` fields from each `SKILL.md`
 
 This allows the model to see which local skills are available and decide when to read and use them.
 
-Before each round, KittyCode checks whether the skill directory changed and reloads the cached skill metadata when needed, so adding or editing skills does not require restarting the process.
+KittyCode loads skills once at startup and keeps that snapshot fixed for the lifetime of the process. Restart KittyCode after adding or editing skills.
 
 You can also invoke a loaded skill directly from the CLI with `/<skill name>`.
 
@@ -158,16 +158,19 @@ Inside the REPL, KittyCode supports:
 - `/sessions`
 - `/quit`
 
-The `/skills` command refreshes the local skill cache if the skill directory has changed and then prints the currently loaded skills.
+The `/skills` command prints the skills loaded at startup.
 Slash commands also support prefix matching while typing, so entering `/` shows matching commands and skills through completion suggestions.
 
 ## Project Layout
 
-- `kittycode/agent.py`: core agent loop
-- `kittycode/llm.py`: streaming LLM wrapper
-- `kittycode/context.py`: context compression
+- `kittycode/__init__.py`: public exports and compatibility aliases for moved runtime modules
+- `kittycode/main.py`: CLI entrypoint wrapper
 - `kittycode/cli.py`: interactive and one-shot CLI
-- `kittycode/session.py`: session persistence
+- `kittycode/config/__init__.py`: config.json loading
+- `kittycode/llm/__init__.py`: provider adapter and streaming parsing
+- `kittycode/prompt/__init__.py`: system/user prompt builders
+- `kittycode/skills/__init__.py`: local skill discovery and caching
+- `kittycode/runtime/`: agent loop, context compression, interrupts, session helpers, and logging setup
 - `kittycode/tools/`: built-in tools
 - `tests/`: focused runtime and tool tests
 

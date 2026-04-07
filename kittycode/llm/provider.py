@@ -1,5 +1,7 @@
 """LLM provider layer for OpenAI-compatible and Anthropic APIs."""
 
+from __future__ import annotations
+
 import json
 import logging
 import time
@@ -9,7 +11,7 @@ import anthropic
 from anthropic import Anthropic
 from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
 
-from .interrupts import CancellationRequested
+from ..runtime.interrupts import CancellationRequested
 
 logger = logging.getLogger(__name__)
 

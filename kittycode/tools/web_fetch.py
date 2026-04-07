@@ -8,7 +8,7 @@ from urllib.parse import urljoin, urlparse, urlunparse
 import requests
 from bs4 import BeautifulSoup
 
-from ..interrupts import CancellationRequested
+from ..runtime.interrupts import CancellationRequested
 from .base import Tool
 
 _DEFAULT_TIMEOUT = 20

@@ -22,6 +22,7 @@ from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import ANSI
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.shortcuts import PromptSession, print_formatted_text
+from prompt_toolkit.utils import get_cwidth
 from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
@@ -29,12 +30,12 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__
-from .agent import Agent
 from .config import CONFIG_PATH, Config
-from .interrupts import CancellationRequested
 from .llm import LLM
-from .logging_utils import configure_logging
-from .session import list_sessions, load_session, save_session
+from .runtime.agent import Agent
+from .runtime.interrupts import CancellationRequested
+from .runtime.logging import configure_logging
+from .runtime.session import list_sessions, load_session, save_session
 
 console = Console()
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -255,7 +256,7 @@ def _repl(agent: Agent, config: Config):
                 input_reader.print(f"Switched to [cyan]{new_model}[/cyan]")
             continue
         if user_input == "/compact":
-            from .context import estimate_tokens
+            from .runtime.context import estimate_tokens
 
             before = estimate_tokens(agent.messages)
             compressed = agent.context.maybe_compress(agent.messages, agent.llm)
@@ -300,7 +301,7 @@ def _repl(agent: Agent, config: Config):
             pending_skill = None
 
         streamed: list[str] = []
-        assistant_stream = _MarkdownStreamRenderer(_emit_raw_terminal)
+        assistant_stream = _MarkdownStreamRenderer(input_reader.write_raw, console_obj=input_reader.rich_console)
 
         def on_token(token):
             streamed.append(token)
@@ -661,10 +662,22 @@ def _render_markdown_as_ansi(text: str) -> str:
     return rendered if rendered.endswith("\n") else f"{rendered}\n"
 
 
-def _rendered_line_count(text: str) -> int:
+def _rendered_line_count(text: str, width: int | None = None) -> int:
     if not text:
         return 0
-    return text.count("\n") if text.endswith("\n") else text.count("\n") + 1
+    terminal_width = console.size.width if width is None else width
+    terminal_width = max(terminal_width, 1)
+    logical_lines = text.split("\n")
+    if text.endswith("\n"):
+        logical_lines = logical_lines[:-1]
+    if not logical_lines:
+        logical_lines = [""]
+
+    total = 0
+    for line in logical_lines:
+        line_width = get_cwidth(_ANSI_RE.sub("", line))
+        total += max((line_width - 1) // terminal_width + 1, 1)
+    return total
 
 
 def _rewind_and_clear_lines(line_count: int) -> str:
@@ -682,15 +695,33 @@ def _rewind_and_clear_lines(line_count: int) -> str:
 
 
 class _MarkdownStreamRenderer:
-    def __init__(self, emit, render=None, refresh_interval: float = 0.05, now=None):
+    """Incrementally stream markdown to the terminal.
+
+    Instead of using ``rich.live.Live`` (which rewrites the *entire* rendered
+    block on every update and breaks when the content exceeds the terminal
+    height), this renderer compares the ANSI output line-by-line against the
+    previous render and only erases + rewrites the changed *tail*.  Because
+    streaming content grows from the end, the tail is always small and the
+    cursor-rewind stays well within the visible viewport.
+    """
+
+    def __init__(self, emit, render=None, refresh_interval: float = 0.05, now=None, terminal_width=None, live_factory=None, console_obj=None):
         self.emit = emit
-        self.render = render or _render_markdown_as_ansi
+        self.render = render or (lambda text: Markdown(text))
         self.refresh_interval = refresh_interval
         self._now = now or time.monotonic
+        self._console = console_obj or console
+        if terminal_width is None:
+            self._terminal_width = lambda: self._console.size.width
+        elif callable(terminal_width):
+            self._terminal_width = terminal_width
+        else:
+            self._terminal_width = lambda: terminal_width
+        # live_factory accepted for backward compatibility but unused
         self._buffer = ""
         self._rendered_buffer = ""
-        self._rendered_line_count = 0
         self._last_emit_at: float | None = None
+        self._emitted_lines: list[str] = []
 
     def write(self, text: str) -> None:
         if not text:
@@ -709,17 +740,64 @@ class _MarkdownStreamRenderer:
 
     def _render_current(self) -> None:
         rendered = self.render(self._buffer)
-        clear = _rewind_and_clear_lines(self._rendered_line_count)
-        if clear or rendered:
-            self.emit(f"{clear}{rendered}")
+        ansi = self._capture(rendered)
+        new_lines = _split_ansi_lines(ansi)
+        old_lines = self._emitted_lines
+
+        if not old_lines:
+            # First render – just emit everything.
+            text = "\n".join(new_lines)
+            if text:
+                self.emit(text + "\n")
+            self._emitted_lines = list(new_lines)
+            self._rendered_buffer = self._buffer
+            return
+
+        # Find the longest common prefix of unchanged lines.
+        common = 0
+        for i in range(min(len(old_lines), len(new_lines))):
+            if old_lines[i] == new_lines[i]:
+                common = i + 1
+            else:
+                break
+
+        old_tail = old_lines[common:]
+        new_tail = new_lines[common:]
+
+        width = self._terminal_width()
+        old_physical = _rendered_line_count("\n".join(old_tail), width) if old_tail else 0
+
+        # Erase the changed tail of the previous render.
+        if old_physical > 0:
+            self.emit(_rewind_and_clear_lines(old_physical))
+
+        # Emit the updated tail.
+        if new_tail:
+            self.emit("\n".join(new_tail) + "\n")
+
+        self._emitted_lines = list(new_lines)
         self._rendered_buffer = self._buffer
-        self._rendered_line_count = _rendered_line_count(rendered)
+
+    def _capture(self, renderable) -> str:
+        with self._console.capture() as cap:
+            self._console.print(renderable, end="")
+        return cap.get()
 
     def _reset(self) -> None:
         self._buffer = ""
         self._rendered_buffer = ""
-        self._rendered_line_count = 0
         self._last_emit_at = None
+        self._emitted_lines = []
+
+
+def _split_ansi_lines(text: str) -> list[str]:
+    """Split ANSI text into logical lines, dropping a final empty element."""
+    if not text:
+        return []
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines = lines[:-1]
+    return lines
 
 
 def _render_startup_header(config: Config, width: int | None = None):
@@ -843,7 +921,8 @@ class _ReadlineInput:
             completer=SlashCommandCompleter(command_provider),
             complete_while_typing=True,
         )
-        self._live_tool_output = _LiveToolOutputRenderer(_emit_raw_terminal)
+        self.rich_console = Console(file=_PromptToolkitOutputFile(self.session.output), force_terminal=True)
+        self._live_tool_output = _LiveToolOutputRenderer(self.write_raw)
 
     def prompt(self, message: str) -> str:
         return self.session.prompt(f"{message} ", complete_while_typing=True)
@@ -853,6 +932,10 @@ class _ReadlineInput:
 
     def write(self, text: str):
         self._emit_ansi(text)
+
+    def write_raw(self, text: str):
+        self.session.output.write_raw(text)
+        self.session.output.flush()
 
     def start_live_tool_output(self):
         self._live_tool_output.start()
@@ -866,6 +949,26 @@ class _ReadlineInput:
     @staticmethod
     def _emit_ansi(text: str):
         print_formatted_text(ANSI(text), end="", flush=True)
+
+
+class _PromptToolkitOutputFile:
+    encoding = "utf-8"
+
+    def __init__(self, output):
+        self.output = output
+
+    def write(self, text: str) -> int:
+        self.output.write_raw(text)
+        return len(text)
+
+    def flush(self) -> None:
+        self.output.flush()
+
+    def isatty(self) -> bool:
+        return True
+
+    def fileno(self) -> int:
+        return sys.stdout.fileno()
 
 
 def _build_input_reader(history_path: str, command_provider):

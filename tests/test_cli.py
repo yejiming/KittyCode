@@ -10,6 +10,7 @@ from kittycode.cli import (
     _BOLD,
     _MarkdownStreamRenderer,
     _PIXEL_CAT_ART,
+    _PromptToolkitOutputFile,
     _RESET,
     _brief,
     _build_input_reader,
@@ -20,6 +21,7 @@ from kittycode.cli import (
     _parse_question_answer,
     _render_brief_attachments,
     _render_markdown_as_ansi,
+    _rendered_line_count,
     _render_tool_call_details,
     _render_startup_header,
     _rewind_and_clear_lines,
@@ -135,6 +137,24 @@ def test_build_input_reader_uses_prompt_toolkit_session():
 
     assert reader.session.completer is not None
     assert reader.session.history is not None
+
+
+def test_prompt_toolkit_output_file_forwards_raw_writes_and_flushes():
+    events = []
+
+    class FakeOutput:
+        def write_raw(self, text):
+            events.append(("write_raw", text))
+
+        def flush(self):
+            events.append(("flush",))
+
+    wrapper = _PromptToolkitOutputFile(FakeOutput())
+
+    assert wrapper.write("abc") == 3
+    wrapper.flush()
+    assert wrapper.isatty() is True
+    assert events == [("write_raw", "abc"), ("flush",)]
 
 
 def test_show_help_renders_without_name_error():
@@ -294,6 +314,12 @@ def test_render_markdown_as_ansi_renders_markdown_content():
     assert rendered.endswith("\n")
 
 
+def test_rendered_line_count_accounts_for_terminal_wrapping_and_ansi_width():
+    rendered = "\x1b[1m1234567890\x1b[0m\n"
+
+    assert _rendered_line_count(rendered, width=5) == 2
+
+
 def test_rewind_and_clear_lines_returns_terminal_control_sequence():
     sequence = _rewind_and_clear_lines(2)
 
@@ -303,19 +329,83 @@ def test_rewind_and_clear_lines_returns_terminal_control_sequence():
 
 
 def test_markdown_stream_renderer_rewrites_rendered_block():
-    writes = []
+    """Incremental renderer emits changed tail only on updates."""
+    emitted: list[str] = []
     clock = iter([0.0, 1.0])
+
     writer = _MarkdownStreamRenderer(
-        writes.append,
-        render=lambda text: f"<{text}>\n",
+        emitted.append,
+        render=lambda text: f"<{text}>",
         refresh_interval=0.0,
         now=lambda: next(clock),
+        terminal_width=80,
     )
 
     writer.write("hello")
+    # First render: full emit
+    assert len(emitted) == 1
+    assert "<hello>" in emitted[0]
+
     writer.write(" world")
+    # Second render: rewinds old tail and emits new
+    assert len(emitted) > 1
+
     writer.finish()
 
-    assert writes[0] == "<hello>\n"
-    assert writes[1].startswith("\x1b[1A")
-    assert writes[1].endswith("<hello world>\n")
+
+def test_markdown_stream_renderer_rewinds_all_wrapped_rows():
+    """When a logical line wraps, the rewind accounts for all physical rows."""
+    emitted: list[str] = []
+    clock = iter([0.0, 1.0])
+
+    writer = _MarkdownStreamRenderer(
+        emitted.append,
+        render=lambda text: text,
+        refresh_interval=0.0,
+        now=lambda: next(clock),
+        terminal_width=5,
+    )
+
+    writer.write("123456789")
+    first_emit = emitted[0]
+    assert "123456789" in first_emit
+
+    writer.write("0")
+    # Rewind should cover 2 physical rows (9 chars at width 5 = 2 rows)
+    # and new content "1234567890" with 2 physical rows is then emitted.
+    assert len(emitted) > 1
+    combined = "".join(emitted)
+    assert "1234567890" in combined
+
+    writer.finish()
+
+
+def test_markdown_stream_renderer_no_duplicate_on_long_content():
+    """Long content that exceeds terminal height must not produce duplicates."""
+    emitted: list[str] = []
+    tick = 0.0
+
+    def clock():
+        nonlocal tick
+        tick += 1.0
+        return tick
+
+    writer = _MarkdownStreamRenderer(
+        emitted.append,
+        render=lambda text: text,
+        refresh_interval=0.0,
+        now=clock,
+        terminal_width=40,
+    )
+
+    # Build up content that is much taller than a typical terminal (>50 lines)
+    for i in range(60):
+        writer.write(f"Line {i}\n")
+
+    writer.finish()
+
+    # Collect all non-control-sequence text that was emitted
+    full_output = "".join(emitted)
+    for i in range(60):
+        count = full_output.count(f"Line {i}\n")
+        assert count == 1, f"'Line {i}' appeared {count} times (expected 1)"

@@ -28,7 +28,7 @@ class AgentTool(Tool):
         if self._parent_agent is None:
             return "Error: agent tool not initialized (no parent agent)"
 
-        from ..agent import Agent
+        from ..runtime.agent import Agent
 
         parent = self._parent_agent
         sub_agent = Agent(
