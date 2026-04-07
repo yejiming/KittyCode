@@ -3,14 +3,17 @@
 import os
 import platform
 import textwrap
+from pathlib import Path
 
 
-def system_prompt(tools, skills=None) -> str:
+AGENTS_DOC = Path.home() / ".kittycode" / "AGENTS.md"
+
+
+def system_prompt(tools) -> str:
     cwd = os.getcwd()
     tool_list = "\n".join(_format_tool_entry(tool) for tool in tools)
     uname = platform.uname()
-
-    return f"""\
+    prompt = f"""\
 You are KittyCode, an AI coding assistant running in the user's terminal.
 You help with software engineering: writing code, fixing bugs, refactoring, explaining code, running commands, and more.
 
@@ -36,6 +39,11 @@ You help with software engineering: writing code, fixing bugs, refactoring, expl
 7. Respect existing style. Match the project's coding conventions.
 8. Ask when unsure. If the request is ambiguous, ask for clarification rather than guessing.
 """
+
+    agents_text = _read_agents_doc()
+    if agents_text:
+        prompt = f"{prompt.rstrip()}\n\n{agents_text}\n"
+    return prompt
 
 
 def user_prompt(user_input: str, skills=None, todos=None) -> str:
@@ -91,3 +99,10 @@ def _format_tool_entry(tool) -> str:
     return "\n".join(
         [f"- **{tool.name}**: {lines[0]}"] + [f"  {line}" for line in lines[1:]]
     )
+
+
+def _read_agents_doc() -> str:
+    try:
+        return AGENTS_DOC.read_text(errors="replace").strip()
+    except OSError:
+        return ""

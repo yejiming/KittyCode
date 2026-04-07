@@ -97,7 +97,7 @@ class Agent:
         self.max_rounds = max_rounds
         self.skills = []
         self._system = ""
-        self.refresh_skills(force_reload=True)
+        self._initialize_prompt_state()
 
         for tool in self.tools:
             tool.bind_agent(self)
@@ -233,7 +233,6 @@ class Agent:
         return [{"role": "system", "content": self._system}] + self.messages
 
     def _build_user_message(self, user_input: str) -> str:
-        self.refresh_skills()
         return user_prompt(user_input, self.skills, self.todos)
 
     def _tool_schemas(self) -> list[dict]:
@@ -356,10 +355,17 @@ class Agent:
         """Clear conversation history."""
         self.messages.clear()
 
+    def _initialize_prompt_state(self) -> None:
+        self.skills = load_skills(force_reload=True)
+        self._system = system_prompt(self.tools)
+
     def refresh_skills(self, force_reload: bool = False):
-        """Refresh cached skill metadata and rebuild the system prompt."""
-        self.skills = load_skills(force_reload=force_reload)
-        self._system = system_prompt(self.tools, self.skills)
+        """Compatibility shim for startup-only skill loading.
+
+        Skills and the system prompt are initialized once when the Agent is
+        created and remain fixed for the lifetime of the process.
+        """
+        return list(self.skills)
 
     @staticmethod
     def _raise_if_cancelled(cancel_event):

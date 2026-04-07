@@ -17,6 +17,7 @@ from pathlib import Path
 from kittycode.agent import Agent
 from kittycode.prompt import system_prompt, user_prompt
 from kittycode.skills import SkillDefinition, load_skills
+from kittycode.tools.skill import SkillTool
 from kittycode.tools import ALL_TOOLS
 
 
@@ -58,15 +59,47 @@ def test_load_skills_reads_front_matter(tmp_path):
     assert skills[0].path == str(skill_dir.resolve())
 
 
-def test_load_skills_falls_back_when_header_missing(tmp_path):
-    skill_dir = tmp_path / "fallback-skill"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("# Fallback Skill\n\nFallback description.\n")
+def test_load_skills_reads_second_level_directories(tmp_path):
+    nested_skill_dir = tmp_path / "group" / "nested-skill"
+    nested_skill_dir.mkdir(parents=True)
+    (nested_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: Nested Skill\n"
+        "description: Nested description.\n"
+        "---\n"
+    )
 
     skills = load_skills(tmp_path, force_reload=True)
 
-    assert skills[0].name == "Fallback Skill"
-    assert skills[0].description == "Fallback description."
+    assert len(skills) == 1
+    assert skills[0].name == "Nested Skill"
+    assert skills[0].description == "Nested description."
+    assert skills[0].path == str(nested_skill_dir.resolve())
+
+
+def test_load_skills_skips_when_name_or_description_missing(tmp_path):
+    valid_skill_dir = tmp_path / "valid-skill"
+    valid_skill_dir.mkdir()
+    (valid_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: Valid Skill\n"
+        "description: Valid description.\n"
+        "---\n"
+    )
+
+    invalid_skill_dir = tmp_path / "invalid-skill"
+    invalid_skill_dir.mkdir()
+    (invalid_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: Invalid Skill\n"
+        "---\n"
+        "\n"
+        "Missing description.\n"
+    )
+
+    skills = load_skills(tmp_path, force_reload=True)
+
+    assert [skill.name for skill in skills] == ["Valid Skill"]
 
 
 def test_load_skills_auto_reloads_after_change(tmp_path):
@@ -84,16 +117,25 @@ def test_load_skills_auto_reloads_after_change(tmp_path):
     assert second[0].description == "New description"
 
 
-def test_system_prompt_mentions_reminder_tags_instead_of_embedding_skills():
-    prompt = system_prompt(
-        ALL_TOOLS[:1],
-        [SkillDefinition(name="Skill A", description="Does A", path="/tmp/skill-a")],
-    )
+def test_system_prompt_mentions_reminder_tags_instead_of_embedding_skills(monkeypatch):
+    monkeypatch.setattr("kittycode.prompt.AGENTS_DOC", Path("/tmp/does-not-exist"))
+    prompt = system_prompt(ALL_TOOLS[:1])
 
     assert "<system-reminder>" in prompt
     assert "<todo-reminder>" in prompt
     assert "available skill blocks" in prompt
     assert "name: Skill A" not in prompt
+
+
+def test_system_prompt_appends_agents_doc(tmp_path, monkeypatch):
+    agents_doc = tmp_path / "AGENTS.md"
+    agents_doc.write_text("## Extra Instructions\nAlways check AGENTS last.\n")
+    monkeypatch.setattr("kittycode.prompt.AGENTS_DOC", agents_doc)
+
+    prompt = system_prompt(ALL_TOOLS[:1])
+
+    assert "## Extra Instructions" in prompt
+    assert prompt.rstrip().endswith("Always check AGENTS last.")
 
 
 def test_user_prompt_appends_skill_and_todo_reminders():
@@ -149,7 +191,7 @@ def test_agent_appends_skill_and_todo_reminders_to_chat_messages(monkeypatch):
     assert "Inspect runtime" in user_message["content"]
 
 
-def test_agent_refreshes_skills_each_user_turn(tmp_path, monkeypatch):
+def test_agent_keeps_startup_loaded_skills_each_user_turn(tmp_path, monkeypatch):
     skill_dir = tmp_path / "live-skill"
     skill_dir.mkdir()
     skill_doc = skill_dir / "SKILL.md"
@@ -168,7 +210,61 @@ def test_agent_refreshes_skills_each_user_turn(tmp_path, monkeypatch):
     skill_doc.write_text("name: Live Skill\ndescription: Updated version\n")
 
     agent.chat("second")
-    assert "Updated version" in llm.captured_messages[1][-1]["content"]
+    assert "First version" in llm.captured_messages[1][-1]["content"]
+    assert "Updated version" not in llm.captured_messages[1][-1]["content"]
+
+
+def test_agent_builds_system_prompt_only_once(monkeypatch):
+    built_prompts = []
+
+    def fake_system_prompt(_tools):
+        built_prompts.append(f"system-{len(built_prompts) + 1}")
+        return built_prompts[-1]
+
+    monkeypatch.setattr("kittycode.agent.system_prompt", fake_system_prompt)
+    monkeypatch.setattr("kittycode.agent.load_skills", lambda force_reload=False: [])
+
+    llm = RecordingLLM()
+    agent = Agent(llm=llm)
+    agent.chat("first")
+    agent.chat("second")
+
+    assert built_prompts == ["system-1"]
+    assert llm.captured_messages[0][0]["content"] == "system-1"
+    assert llm.captured_messages[1][0]["content"] == "system-1"
+
+
+def test_skill_tool_uses_bound_agent_skills_without_reloading(tmp_path, monkeypatch):
+    skill_dir = tmp_path / "frozen-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: Frozen Skill\n"
+        "description: Frozen description.\n"
+        "---\n"
+        "\n"
+        "Use the frozen workflow.\n"
+    )
+
+    loaded_skill = SkillDefinition(
+        name="Frozen Skill",
+        description="Frozen description.",
+        path=str(skill_dir.resolve()),
+    )
+
+    monkeypatch.setattr("kittycode.agent.load_skills", lambda force_reload=False: [loaded_skill])
+
+    agent = Agent(llm=DummyLLM())
+    tool = SkillTool()
+    tool.bind_agent(agent)
+
+    monkeypatch.setattr("kittycode.tools.skill.load_skills", lambda: [])
+
+    result = tool.execute("Frozen Skill")
+
+    assert 'Skill "Frozen Skill" selected.' in result
+    assert "Frozen description." in result
+    assert "Use the frozen workflow." in result
 
 
 def test_format_skills_output():

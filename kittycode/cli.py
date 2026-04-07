@@ -208,7 +208,6 @@ def _repl(agent: Agent, config: Config):
 
     while True:
         try:
-            agent.refresh_skills()
             user_input = input_reader.prompt("You >").strip()
         except (EOFError, KeyboardInterrupt):
             input_reader.print("\nBye!")
@@ -235,7 +234,6 @@ def _repl(agent: Agent, config: Config):
             input_reader.print("[yellow]Conversation reset.[/yellow]")
             continue
         if user_input == "/skills":
-            agent.refresh_skills()
             _show_skills(agent.skills, input_reader)
             continue
         if user_input == "/tokens":

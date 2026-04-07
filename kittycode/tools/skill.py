@@ -13,6 +13,7 @@ _MAX_LISTED_FILES = 24
 
 class SkillTool(Tool):
     name = "skill"
+    _parent_agent = None
     description = """
     Load a local skill from ~/.kittycode/skills and inject its instructions
     into the current run. Available skill blocks are surfaced through
@@ -43,9 +44,10 @@ class SkillTool(Tool):
         if not normalized:
             return "Error: skill is required"
 
-        selected = _find_skill(normalized)
+        available_skills = self._available_skills()
+        selected = _find_skill(normalized, available_skills)
         if selected is None:
-            available = ", ".join(skill_def.name for skill_def in load_skills()) or "(none)"
+            available = ", ".join(skill_def.name for skill_def in available_skills) or "(none)"
             return f'Error: unknown skill "{normalized}". Available skills: {available}'
 
         skill_doc = Path(selected.path) / "SKILL.md"
@@ -82,10 +84,15 @@ class SkillTool(Tool):
         )
         return "\n".join(lines).strip()
 
+    def _available_skills(self):
+        if self._parent_agent is not None:
+            return list(getattr(self._parent_agent, "skills", []))
+        return load_skills()
 
-def _find_skill(name: str):
+
+def _find_skill(name: str, skills):
     target = name.casefold()
-    for skill in load_skills():
+    for skill in skills:
         if skill.name.casefold() == target:
             return skill
         if Path(skill.path).name.casefold() == target:

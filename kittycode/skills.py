@@ -48,13 +48,10 @@ def load_skills(skills_dir: Path | str | None = None, force_reload: bool = False
         return []
 
     skills: list[SkillDefinition] = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            continue
-        skill_doc = entry / "SKILL.md"
-        if not skill_doc.is_file():
-            continue
-        skills.append(_read_skill(entry, skill_doc))
+    for skill_dir, skill_doc in _iter_skill_docs(root):
+        skill = _read_skill(skill_dir, skill_doc)
+        if skill is not None:
+            skills.append(skill)
 
     _cached_root = root
     _cached_skills = tuple(skills)
@@ -67,22 +64,35 @@ def _build_signature(root: Path) -> tuple:
         return ("missing", str(root))
 
     items = []
-    for entry in sorted(root.iterdir()):
-        if not entry.is_dir():
-            continue
-        skill_doc = entry / "SKILL.md"
-        if not skill_doc.is_file():
-            continue
+    for entry, skill_doc in _iter_skill_docs(root):
         stat = skill_doc.stat()
-        items.append((entry.name, stat.st_mtime_ns, stat.st_size))
+        items.append((entry.relative_to(root).as_posix(), stat.st_mtime_ns, stat.st_size))
     return tuple(items)
 
 
-def _read_skill(skill_dir: Path, skill_doc: Path) -> SkillDefinition:
+def _iter_skill_docs(root: Path):
+    candidates: list[Path] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        candidates.append(entry)
+        for child in entry.iterdir():
+            if child.is_dir():
+                candidates.append(child)
+
+    for skill_dir in sorted(candidates, key=lambda path: path.relative_to(root).as_posix()):
+        skill_doc = skill_dir / "SKILL.md"
+        if skill_doc.is_file():
+            yield skill_dir, skill_doc
+
+
+def _read_skill(skill_dir: Path, skill_doc: Path) -> SkillDefinition | None:
     name, description = _parse_skill_header(skill_doc.read_text(errors="replace"))
+    if not name or not description:
+        return None
     return SkillDefinition(
-        name=name or skill_dir.name,
-        description=description or "No description provided.",
+        name=name,
+        description=description,
         path=str(skill_dir.resolve()),
     )
 
@@ -107,19 +117,5 @@ def _parse_skill_header(text: str) -> tuple[str, str]:
 
         if name and description:
             return name, description
-
-    for line in lines[:20]:
-        stripped = line.strip()
-        if stripped.startswith("# "):
-            name = name or stripped[2:].strip()
-            break
-
-    if not description:
-        for line in lines[:40]:
-            stripped = line.strip()
-            if not stripped or stripped.startswith("#") or stripped == "---":
-                continue
-            description = stripped
-            break
 
     return name, description
