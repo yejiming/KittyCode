@@ -85,12 +85,25 @@ def test_live_tool_output_renderer_finish_prints_last_seven_line_summary():
         assert f"line {index}" in emitted[-1]
 
 
-def test_readline_input_live_output_uses_terminal_fallback(monkeypatch):
-    captured = []
+def test_readline_input_live_output_renders_in_shared_transcript_while_running():
     reader = _ReadlineInput("/tmp/kittycode-history", lambda: {"/help"})
 
-    monkeypatch.setattr("kittycode.cli._emit_raw_terminal", captured.append)
-    reader._live_tool_output = _LiveToolOutputRenderer(captured.append)
+    reader.start_live_tool_output()
     reader.append_live_tool_output("hello")
 
-    assert captured == ["\r\x1b[2K\x1b[90mhello\x1b[0m"]
+    assert reader._transient_output is not None
+    assert reader._transient_output.role == "tool"
+    assert reader._transient_output.text == "hello"
+    assert reader.history_buffer.text == "Tool Output\nhello"
+
+
+def test_readline_input_finish_live_output_keeps_plain_summary_in_history():
+    reader = _ReadlineInput("/tmp/kittycode-history", lambda: {"/help"})
+
+    reader.start_live_tool_output()
+    reader.append_live_tool_output("one\ntwo")
+    reader.finish_live_tool_output()
+
+    assert reader._transient_output is None
+    assert "one" in reader.history_buffer.text
+    assert "two" in reader.history_buffer.text
