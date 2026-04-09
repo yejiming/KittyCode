@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kittycode"
-version = "0.2.0"
+version = "0.3.0"
 description = "A minimal, hackable AI coding agent with a composable tool loop and modular skills."
 readme = "README.md"
 license = "MIT"

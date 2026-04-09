@@ -16,6 +16,9 @@ venv/
 .DS_Store
 dist/
 .pytest_cache/
+.planning/
+.claude/
+.codex/
 AGENTS.md
 findings.md
 progress.md
