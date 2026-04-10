@@ -25,13 +25,16 @@ from kittycode.cli import (
     _create_agent,
     _format_tool_call_details,
     _format_tool_call,
+    _filter_think_display_text,
     _format_model_choices,
     _format_question_prompt,
     _input_area_height_for_text,
+    _last_line_start_offset,
     _merge_prompt_toolkit_styles,
     _merge_columns,
     _normalize_output_text,
     _parse_question_answer,
+    _parse_args,
     _load_config,
     _render_brief_attachments,
     _render_markdown_to_plain_text,
@@ -41,6 +44,7 @@ from kittycode.cli import (
     _resume_agent_session,
     _show_tool_call,
     _show_help,
+    _style_startup_line,
     _startup_right_box_lines,
     _startup_left_box_lines,
     _style_history_markdown_line,
@@ -55,11 +59,11 @@ def test_history_app_style_uses_low_saturation_role_palette():
     assert _APP_STYLE.style_rules == [
         ("history.system", "fg:#56b6c2"),
         ("history.user", "fg:#27cd96"),
-        ("history.assistant", "fg:#d96b78"),
+        ("history.assistant", "fg:#d68786"),
         ("history.assistant.label", "bold"),
         ("history.tool", "fg:#56b6c2"),
-        ("footer", "fg:#56b6c2"),
-        ("footer.label", "fg:#56b6c2 bold"),
+        ("footer", "fg:#d68786"),
+        ("footer.label", "fg:#d68786 bold"),
         ("history.markdown.heading1", "bold underline"),
         ("history.markdown.heading2", "bold"),
         ("history.markdown.heading3", "bold"),
@@ -74,6 +78,10 @@ def test_history_app_style_uses_low_saturation_role_palette():
         ("history.markdown.code", "fg:#b6a58e"),
         ("history.markdown.fence", "fg:#8d98a5"),
         ("history.markdown.codeblock", "fg:#9ea7b2"),
+        ("input.rule", "fg:#6b7280"),
+        ("startup.text", "fg:#6b7280"),
+        ("startup.frame", "fg:#d68786"),
+        ("startup.cat", "fg:#d68786"),
     ]
 
 
@@ -94,6 +102,24 @@ def test_merge_prompt_toolkit_styles_preserves_inline_styles():
     )
 
     assert merged == "class:history.user bold fg:#ffffff"
+
+
+def test_style_startup_line_colors_frame_and_cat_but_keeps_text_gray():
+    cat_fragments = _style_startup_line("│ /\\_/\\\\                     │  │ Interface: openai │", "class:startup.text")
+    text_fragments = _style_startup_line("│          KittyCode v0.3.0          │", "class:startup.text")
+
+    assert cat_fragments[0] == ("class:startup.text,startup.frame", "│")
+    assert cat_fragments[2] == ("class:startup.text,startup.cat", "/")
+    assert ("class:startup.text", "I") in cat_fragments
+    assert ("class:startup.text,startup.frame", "│") in cat_fragments[-3:]
+    assert any(fragment == ("class:startup.text", "K") for fragment in text_fragments)
+
+
+def test_style_startup_line_keeps_non_cat_slashes_gray():
+    fragments = _style_startup_line("│ Type /help for commands │", "class:startup.text")
+
+    assert ("class:startup.text,startup.cat", "/") not in fragments
+    assert ("class:startup.text", "/") in fragments
 
 
 def test_pixel_cat_art_has_cat_ear_silhouette():
@@ -145,6 +171,59 @@ def test_render_startup_header_hides_right_column_when_narrow():
     assert "Type /help for commands" not in output
 
 
+def test_render_startup_header_falls_back_to_single_left_box_before_right_box_gets_cramped():
+    config = Config(
+        interface="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+    )
+
+    console = Console(record=True, width=64)
+    console.print(_render_startup_header(config, width=64))
+    output = console.export_text()
+
+    assert f"KittyCode v{__version__}" in output
+    assert "Model: gpt-4o" in output
+    assert "Interface: openai" not in output
+    assert "Base: https://api.openai.com/v1" not in output
+
+
+def test_render_startup_header_switches_to_compact_box_when_terminal_is_too_narrow():
+    config = Config(
+        interface="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+    )
+
+    console = Console(record=True, width=32)
+    console.print(_render_startup_header(config, width=32))
+    output = console.export_text()
+    lines = output.splitlines()
+
+    assert f"KittyCode v{__version__}" in output
+    assert "Model: gpt-4o" in output
+    assert " /\\_/\\\\" not in output
+    assert all(len(line) <= 32 for line in lines if line)
+
+
+def test_render_startup_header_uses_minimal_text_header_at_extreme_narrow_widths():
+    config = Config(
+        interface="openai",
+        model="gpt-4o",
+        base_url="https://api.openai.com/v1",
+    )
+
+    console = Console(record=True, width=12)
+    console.print(_render_startup_header(config, width=12))
+    output = console.export_text()
+    lines = output.splitlines()
+
+    assert "KittyCode" in output
+    assert "╭" not in output
+    assert "╯" not in output
+    assert all(len(line) <= 12 for line in lines if line)
+
+
 def test_startup_left_box_centers_cat_art():
     config = Config(model="gpt-4o")
     lines = _startup_left_box_lines(config)
@@ -183,6 +262,16 @@ def test_startup_right_box_only_bolds_shortcuts_in_help_hint():
     assert "exit." in rendered
 
 
+def test_startup_right_box_adapts_to_narrow_available_width():
+    config = Config(interface="openai", model="gpt-4o", base_url="https://api.openai.com/v1")
+
+    right_lines = _startup_right_box_lines(config, 28)
+
+    assert max(len(line) for line in right_lines) <= 28
+    assert any("Interface:" in line for line in right_lines)
+    assert any("Base:" in line for line in right_lines)
+
+
 def test_build_input_reader_keeps_history_path():
     reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help"})
 
@@ -198,6 +287,29 @@ def test_build_input_reader_uses_prompt_toolkit_session():
     assert reader.session.history is not None
     assert reader.layout is not None
     assert reader.input_buffer.history is reader.session.history
+
+
+def test_build_input_reader_uses_rule_lines_and_bold_chevron_prompt():
+    reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help", "/quit"})
+    prompt_processor = reader.input_area.control.input_processors[-1]
+
+    assert reader._input_top_rule_window is not None
+    assert reader._input_bottom_rule_window is not None
+    assert prompt_processor.text == [("bold", "> ")]
+
+
+def test_history_render_width_prefers_history_window_render_width():
+    reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help"})
+    reader.history_window.render_info = SimpleNamespace(window_width=37)
+
+    assert reader._history_render_width() == 37
+
+
+def test_input_area_content_width_prefers_input_window_render_width():
+    reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help"})
+    reader.input_area.window.render_info = SimpleNamespace(window_width=29)
+
+    assert reader._input_area_content_width() == 29
 
 
 def test_build_input_reader_wraps_layout_in_float_container_with_completion_menu():
@@ -372,6 +484,12 @@ def test_reader_write_raw_preserves_raw_text_in_history_buffer():
     assert reader.history_buffer.text == "\x1b[31mhello\x1b[0m"
 
 
+def test_last_line_start_offset_returns_start_of_final_line():
+    assert _last_line_start_offset("") == 0
+    assert _last_line_start_offset("hello") == 0
+    assert _last_line_start_offset("one\ntwo") == 4
+
+
 def test_build_history_line_metadata_marks_assistant_label_line():
     metadata = _build_history_line_metadata(
         SimpleNamespace(role="assistant", kind="plain", text="hello"),
@@ -423,6 +541,7 @@ def test_reader_finalizes_transient_message_before_next_committed_entry():
     ]
     assert reader._transient_output is None
     assert reader.history_buffer.text == "partial\n\nfinal answer"
+    assert reader.history_buffer.document.cursor_position == len("partial\n\n")
 
 
 def test_reader_live_tool_output_stays_in_shared_transcript_while_active_and_after_finish():
@@ -855,6 +974,23 @@ def test_load_config_exits_with_validation_guidance(monkeypatch):
     assert any("models[0].model_name is required" in line for line in printed)
 
 
+def test_parse_args_help_mentions_config_and_hides_runtime_override_flags(monkeypatch, capsys):
+    monkeypatch.setattr("sys.argv", ["kittycode", "--help"])
+
+    with pytest.raises(SystemExit, match="0"):
+        _parse_args()
+
+    captured = capsys.readouterr()
+    help_text = captured.out
+
+    assert "--config" in help_text
+    assert "Open the guided configuration setup" in help_text
+    assert "-m" not in help_text
+    assert "--interface" not in help_text
+    assert "--base-url" not in help_text
+    assert "--api-key" not in help_text
+
+
 def test_main_routes_prompt_to_run_once(monkeypatch):
     args = SimpleNamespace(prompt="hello", resume=None)
     config = Config(api_key="secret")
@@ -1101,7 +1237,7 @@ def test_render_tool_call_details_returns_panel_with_full_arguments():
     assert '"file_path"' not in output
 
 
-def test_show_tool_call_prints_summary_then_detail_panel():
+def test_show_tool_call_prints_detail_panel_only():
     class FakeIO:
         def __init__(self):
             self.values = []
@@ -1113,8 +1249,8 @@ def test_show_tool_call_prints_summary_then_detail_panel():
 
     _show_tool_call(io, "grep", {"pattern": "needle", "path": "src"})
 
-    assert io.values[0].startswith("\n[dim]> grep(")
-    assert isinstance(io.values[1], Panel)
+    assert len(io.values) == 1
+    assert isinstance(io.values[0], Panel)
 
 
 def test_write_assistant_response_renders_markdown_to_plain_text_and_appends_newline():
@@ -1125,6 +1261,22 @@ def test_write_assistant_response_renders_markdown_to_plain_text_and_appends_new
     assert len(writes) == 1
     assert "hello" in writes[0]
     assert "**hello**" not in writes[0]
+    assert writes[0].endswith("\n")
+
+
+def test_filter_think_display_text_hides_content_between_think_markers():
+    assert _filter_think_display_text("hello<think>secret</think>world") == "helloworld"
+    assert _filter_think_display_text("hello<think>secret<think>world") == "helloworld"
+    assert _filter_think_display_text("<think>secret") == ""
+
+
+def test_write_assistant_response_hides_think_content():
+    writes = []
+
+    _write_assistant_response(writes.append, "hello<think>secret</think>world")
+
+    assert len(writes) == 1
+    assert writes[0].strip() == "helloworld"
     assert writes[0].endswith("\n")
 
 
@@ -1281,12 +1433,30 @@ def test_markdown_stream_renderer_on_text_keeps_reader_transcript_without_duplic
     assert reader._transient_output is not None
     assert reader._transient_output.role == "assistant"
     assert reader._transient_output.kind == "markdown"
-    assert reader._transient_output.text == "hello world"
+
+
+def test_markdown_stream_renderer_hides_think_content_from_transcript():
+    reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help"})
+
+    writer = _MarkdownStreamRenderer(
+        lambda _text: None,
+        refresh_interval=0.0,
+        now=lambda: 0.0,
+        terminal_width=80,
+        on_finish=reader.finalize_active_output,
+        on_text=lambda text: reader.write_raw(text, kind="markdown"),
+    )
+
+    writer.write("hello<think>secret")
+    writer.write("</think>world")
+
+    assert reader._transient_output is not None
+    assert reader._transient_output.text == "helloworld"
 
     writer.finish()
 
     assert [(item.role, item.kind, item.text) for item in reader._history_items] == [
-        ("assistant", "markdown", "hello world"),
+        ("assistant", "markdown", "helloworld"),
     ]
 
 
