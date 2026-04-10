@@ -2,6 +2,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from rich.console import Console
 from rich.panel import Panel
 from prompt_toolkit.completion import CompleteEvent
@@ -24,12 +25,14 @@ from kittycode.cli import (
     _create_agent,
     _format_tool_call_details,
     _format_tool_call,
+    _format_model_choices,
     _format_question_prompt,
     _input_area_height_for_text,
     _merge_prompt_toolkit_styles,
     _merge_columns,
     _normalize_output_text,
     _parse_question_answer,
+    _load_config,
     _render_brief_attachments,
     _render_markdown_to_plain_text,
     _render_tool_call_details,
@@ -48,11 +51,10 @@ from kittycode.cli import (
 )
 from kittycode.config import Config
 
-
 def test_history_app_style_uses_low_saturation_role_palette():
     assert _APP_STYLE.style_rules == [
         ("history.system", "fg:#56b6c2"),
-        ("history.user", "fg:#27cd96 bold"),
+        ("history.user", "fg:#27cd96"),
         ("history.assistant", "fg:#d96b78"),
         ("history.assistant.label", "bold"),
         ("history.tool", "fg:#56b6c2"),
@@ -367,17 +369,16 @@ def test_reader_write_raw_preserves_raw_text_in_history_buffer():
     assert reader._transient_output is not None
     assert reader._transient_output.role == "assistant"
     assert reader._transient_output.text == "\x1b[31mhello\x1b[0m"
-    assert reader.history_buffer.text == "KittyCode\n\x1b[31mhello\x1b[0m"
+    assert reader.history_buffer.text == "\x1b[31mhello\x1b[0m"
 
 
 def test_build_history_line_metadata_marks_assistant_label_line():
     metadata = _build_history_line_metadata(
         SimpleNamespace(role="assistant", kind="plain", text="hello"),
-        "KittyCode\nhello",
+        "hello",
     )
 
-    assert metadata[0] == {"base_style": "class:history.assistant", "label": True}
-    assert metadata[1] == {"base_style": "class:history.assistant"}
+    assert metadata == [{"base_style": "class:history.assistant"}]
 
 
 def test_reader_clear_history_resets_buffer_contents():
@@ -402,9 +403,8 @@ def test_reader_commits_user_and_system_history_as_discrete_blocks():
         ("user", "/help"),
         ("system", "Conversation reset."),
     ]
-    assert reader.history_buffer.text == "You\n/help\n\nConversation reset."
+    assert reader.history_buffer.text == "> /help\n\nConversation reset."
     assert reader._history_line_metadata == [
-        {"base_style": "class:history.user"},
         {"base_style": "class:history.user"},
         {},
         {"base_style": "class:history.system"},
@@ -422,7 +422,7 @@ def test_reader_finalizes_transient_message_before_next_committed_entry():
         ("assistant", "final answer"),
     ]
     assert reader._transient_output is None
-    assert reader.history_buffer.text == "KittyCode\npartial\n\nKittyCode\nfinal answer"
+    assert reader.history_buffer.text == "partial\n\nfinal answer"
 
 
 def test_reader_live_tool_output_stays_in_shared_transcript_while_active_and_after_finish():
@@ -454,7 +454,7 @@ def test_render_message_to_text_renders_markdown_for_history():
         width=80,
     )
 
-    assert rendered.startswith("KittyCode\n")
+    assert "KittyCode" not in rendered
     assert "Title" in rendered
     assert "• item" in rendered
     assert "print(1)" in rendered
@@ -469,10 +469,15 @@ def test_reader_write_raw_markdown_renders_markdown_in_history_buffer():
 
     assert reader._transient_output is not None
     assert reader._transient_output.kind == "markdown"
-    assert "KittyCode\n" in reader.history_buffer.text
     assert "Title" in reader.history_buffer.text
     assert "• item" in reader.history_buffer.text
     assert "# Title" not in reader.history_buffer.text
+
+
+def test_render_message_to_text_prefixes_user_history_with_angle_marker():
+    rendered = render_message_to_text("user", "plain", "hello", width=80)
+
+    assert rendered == "> hello"
 
 
 def test_build_history_line_metadata_maps_rendered_markdown_lines_to_styles():
@@ -515,7 +520,7 @@ def test_build_history_line_metadata_keeps_raw_markdown_line_for_inline_styling(
         rendered,
     )
 
-    assert metadata[1]["raw_text"] == markdown
+    assert metadata[0]["raw_text"] == markdown
 
 
 def test_history_line_metadata_stays_aligned_after_markdown_then_user_message():
@@ -526,16 +531,13 @@ def test_history_line_metadata_stays_aligned_after_markdown_then_user_message():
     reader._commit_prompt_input_ui("/help")
 
     assert reader.history_buffer.text.split("\n") == [
-        "KittyCode",
         "                                   Title                                    ",
         "",
         " • item                                                                     ",
         "",
-        "You",
-        "/help",
+        "> /help",
     ]
     assert reader._history_line_metadata == [
-        {"base_style": "class:history.assistant", "label": True},
         {
             "base_style": "class:history.assistant",
             "markdown": True,
@@ -550,7 +552,6 @@ def test_history_line_metadata_stays_aligned_after_markdown_then_user_message():
             "raw_text": "- item",
         },
         {},
-        {"base_style": "class:history.user"},
         {"base_style": "class:history.user"},
     ]
 
@@ -791,6 +792,15 @@ def test_resume_agent_session_attaches_loaded_messages(monkeypatch):
 
 def test_build_cli_runtime_applies_overrides_and_resume(monkeypatch):
     base_config = Config(api_key="initial", model="base-model", interface="openai")
+    base_config.models = [
+        SimpleNamespace(
+            interface="openai",
+            provider="openai",
+            api_key="initial",
+            model_name="base-model",
+            base_url="https://base.test/v1",
+        )
+    ]
 
     monkeypatch.setattr("kittycode.cli._load_config", lambda: base_config)
 
@@ -822,7 +832,27 @@ def test_build_cli_runtime_applies_overrides_and_resume(monkeypatch):
     assert config.interface == "anthropic"
     assert config.base_url == "https://override.test"
     assert config.api_key == "override-key"
+    assert len(config.models) == 1
+    assert config.models[0].interface == "openai"
+    assert config.models[0].model_name == "base-model"
     assert agent.messages == [{"role": "assistant", "content": "restored"}]
+
+
+def test_load_config_exits_with_validation_guidance(monkeypatch):
+    printed = []
+
+    monkeypatch.setattr(
+        "kittycode.cli.Config.from_file",
+        lambda: (_ for _ in ()).throw(ValueError("models[0].model_name is required")),
+    )
+    monkeypatch.setattr("kittycode.cli.console.print", lambda message="", *args, **kwargs: printed.append(str(message)))
+
+    with pytest.raises(SystemExit, match="1"):
+        _load_config()
+
+    assert any("Invalid config file" in line for line in printed)
+    assert any("kittycode --config" in line for line in printed)
+    assert any("models[0].model_name is required" in line for line in printed)
 
 
 def test_main_routes_prompt_to_run_once(monkeypatch):
@@ -879,6 +909,79 @@ def test_prompt_toolkit_output_file_forwards_raw_writes_and_flushes():
 
 def test_show_help_renders_without_name_error():
     _show_help()
+
+
+def test_show_help_lists_model_selector_without_trailing_name_contract():
+    console = Console(record=True, width=80)
+
+    _show_help(io=console)
+
+    rendered = console.export_text()
+    assert "/model         Switch model mid-conversation" in rendered
+    assert "/model <name>" not in rendered
+
+
+def test_format_model_choices_marks_active_entry():
+    settings_module = __import__("kittycode.config.settings", fromlist=["StoredModelConfig"])
+    config = Config(
+        interface="openai",
+        model="gpt-4o",
+        api_key="sk-openai",
+        base_url="https://api.openai.com/v1",
+        models=[
+            settings_module.StoredModelConfig(
+                interface="openai",
+                provider="OpenAI",
+                api_key="sk-openai",
+                model_name="gpt-4o",
+                base_url="https://api.openai.com/v1",
+            ),
+            settings_module.StoredModelConfig(
+                interface="anthropic",
+                provider="Anthropic",
+                api_key="sk-ant",
+                model_name="claude-3-7-sonnet-latest",
+                base_url="https://api.anthropic.com",
+            ),
+        ],
+    )
+
+    lines, notice = _format_model_choices(config)
+
+    assert lines == [
+        "Provider | Model",
+        "1. * OpenAI | gpt-4o",
+        "2.   Anthropic | claude-3-7-sonnet-latest",
+    ]
+    assert notice is None
+
+
+def test_format_model_choices_reports_non_catalog_runtime_and_single_model_notice():
+    settings_module = __import__("kittycode.config.settings", fromlist=["StoredModelConfig"])
+    config = Config(
+        interface="openai",
+        model="override-model",
+        api_key="override-key",
+        base_url="https://override.example/v1",
+        models=[
+            settings_module.StoredModelConfig(
+                interface="openai",
+                provider="DeepSeek",
+                api_key="sk-test",
+                model_name="deepseek-chat",
+                base_url="https://api.deepseek.com/v1",
+            )
+        ],
+    )
+
+    lines, notice = _format_model_choices(config)
+
+    assert lines == [
+        "Provider | Model",
+        "1.   DeepSeek | deepseek-chat",
+    ]
+    assert "Current runtime is outside the configured model list." in notice
+    assert "Only one configured model is available" in notice
 
 
 def test_format_question_prompt_lists_options_and_free_text_hint():
@@ -1207,15 +1310,47 @@ def test_repl_command_controls_render_via_reader_print(monkeypatch):
         def maybe_compress(self, messages, llm):
             return True
 
+    settings_module = __import__("kittycode.config.settings", fromlist=["StoredModelConfig"])
+
+    reconfigured = []
+    writes = []
+
     agent = SimpleNamespace(
         skills=[],
-        llm=SimpleNamespace(model="gpt-4o", total_prompt_tokens=10, total_completion_tokens=5),
+        llm=SimpleNamespace(
+            model="gpt-4o",
+            total_prompt_tokens=10,
+            total_completion_tokens=5,
+            reconfigure=lambda **kwargs: reconfigured.append(kwargs),
+        ),
         messages=[{"role": "user", "content": "hi"}],
         context=FakeContext(),
         reset=lambda: None,
     )
-    config = Config(model="gpt-4o")
-    reader = FakeReader(["/tokens", "/model gpt-5", "/compact", "/reset", "/quit"])
+    config = Config(
+        interface="openai",
+        model="gpt-4o",
+        api_key="sk-openai",
+        base_url="https://api.openai.com/v1",
+        models=[
+            settings_module.StoredModelConfig(
+                interface="openai",
+                provider="OpenAI",
+                api_key="sk-openai",
+                model_name="gpt-4o",
+                base_url="https://api.openai.com/v1",
+            ),
+            settings_module.StoredModelConfig(
+                interface="anthropic",
+                provider="Anthropic",
+                api_key="sk-ant",
+                model_name="claude-3-7-sonnet-latest",
+                base_url="https://api.anthropic.com",
+            ),
+        ],
+    )
+    config.write = lambda: writes.append("saved")
+    reader = FakeReader(["/tokens", "/model", "2", "/compact", "/reset", "/quit"])
 
     monkeypatch.setattr("kittycode.cli._build_input_reader", lambda *args, **kwargs: reader)
     monkeypatch.setattr("kittycode.runtime.context.estimate_tokens", lambda _messages: 42)
@@ -1223,7 +1358,73 @@ def test_repl_command_controls_render_via_reader_print(monkeypatch):
     _repl(agent, config)
 
     assert any("Tokens used this session:" in value for value in reader.printed)
-    assert any("Switched to [cyan]gpt-5[/cyan]" == value for value in reader.printed)
+    assert any("Provider | Model" in value for value in reader.printed)
+    assert any("Switched to [cyan]Anthropic/claude-3-7-sonnet-latest[/cyan]" == value for value in reader.printed)
     assert any("[green]Compressed: 42 -> 42 tokens (1 messages)[/green]" == value for value in reader.printed)
     assert any("[yellow]Conversation reset.[/yellow]" == value for value in reader.printed)
+    assert reconfigured == [
+        {
+            "model": "claude-3-7-sonnet-latest",
+            "api_key": "sk-ant",
+            "interface": "anthropic",
+            "base_url": "https://api.anthropic.com",
+        }
+    ]
+    assert writes == ["saved"]
+    assert config.model == "claude-3-7-sonnet-latest"
     assert reader.cleared == 1
+
+
+def test_repl_model_command_shows_single_model_message_without_switching(monkeypatch):
+    class FakeReader:
+        def __init__(self, values):
+            self.values = iter(values)
+            self.printed = []
+
+        def print(self, value):
+            self.printed.append(value)
+
+        def prompt(self, _message):
+            return next(self.values)
+
+        def clear_history(self):
+            pass
+
+    settings_module = __import__("kittycode.config.settings", fromlist=["StoredModelConfig"])
+    reconfigured = []
+    agent = SimpleNamespace(
+        skills=[],
+        llm=SimpleNamespace(
+            model="deepseek-chat",
+            total_prompt_tokens=0,
+            total_completion_tokens=0,
+            reconfigure=lambda **kwargs: reconfigured.append(kwargs),
+        ),
+        messages=[],
+        context=SimpleNamespace(maybe_compress=lambda messages, llm: False),
+        reset=lambda: None,
+    )
+    config = Config(
+        interface="openai",
+        model="deepseek-chat",
+        api_key="sk-test",
+        base_url="https://api.deepseek.com/v1",
+        models=[
+            settings_module.StoredModelConfig(
+                interface="openai",
+                provider="DeepSeek",
+                api_key="sk-test",
+                model_name="deepseek-chat",
+                base_url="https://api.deepseek.com/v1",
+            )
+        ],
+    )
+    reader = FakeReader(["/model", "/quit"])
+
+    monkeypatch.setattr("kittycode.cli._build_input_reader", lambda *args, **kwargs: reader)
+
+    _repl(agent, config)
+
+    assert any("Provider | Model" in value for value in reader.printed)
+    assert "[dim]Only one configured model is available, so switching is unavailable.[/dim]" in reader.printed
+    assert reconfigured == []

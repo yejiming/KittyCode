@@ -37,47 +37,50 @@ KittyCode 的基本工作方式如下：
 pip install kittycode
 ```
 
-```## 配置说明
+## 配置说明
 
 KittyCode 启动时会从 `~/.kittycode/config.json` 读取配置。
 
-支持的字段包括：
+推荐使用顶层 `models` 数组来保存一个或多个模型。每个模型项包含以下字段：
 
-- `interface`：`openai` 或 `anthropic`
+- `interface`：运行时适配器类型，目前为 `openai` 或 `anthropic`
+- `provider`：面向用户的提供商标识或 preset 名称
 - `api_key`
-- `model`
+- `model_name`
 - `base_url`
 - `max_tokens`
 - `temperature`
 - `max_context`
 
-OpenAI 兼容接口示例：
+配置示例：
 
 ```json
 {
-	"interface": "openai",
-	"api_key": "sk-...",
-	"model": "gpt-4o",
-	"base_url": "https://api.openai.com/v1",
-	"max_tokens": 4096,
+	"models": [
+		{
+			"interface": "openai",
+			"provider": "openai",
+			"api_key": "sk-...",
+			"model_name": "gpt-4o",
+			"base_url": "https://api.openai.com/v1"
+		},
+		{
+			"interface": "anthropic",
+			"provider": "anthropic",
+			"api_key": "sk-ant-...",
+			"model_name": "claude-3-7-sonnet-latest",
+			"base_url": "https://api.anthropic.com"
+		}
+	],
+	"max_tokens": 32000,
 	"temperature": 0,
-	"max_context": 128000
+	"max_context": 200000
 }
 ```
-Anthropic 接口示例：
 
-```json
-{
-	"interface": "anthropic",
-	"api_key": "sk-ant-...",
-	"model": "claude-3-7-sonnet-latest",
-	"base_url": "https://api.anthropic.com",
-	"max_tokens": 4096,
-	"temperature": 0,
-	"max_context": 128000
-}
-```
-如果需要，也可以通过命令行参数临时覆盖这些配置，例如 `--model`、`--interface`、`--base-url`、`--api-key`。
+启动时，KittyCode 会把 `models` 中的第一个模型作为当前活跃模型。`interface` 决定实际走哪个运行时适配器，`provider` 则保留为面向用户的提供商标识，供后续 preset 和选择流程使用。
+
+如果需要，也可以通过命令行参数临时覆盖当前运行时配置，例如 `--model`、`--interface`、`--base-url`、`--api-key`。
 
 ## Skills 机制
 

@@ -61,13 +61,10 @@ class LLM:
         self.interface = interface
         self.api_key = api_key
         self.base_url = base_url
-        if interface == "anthropic":
-            self.client = Anthropic(api_key=api_key, base_url=base_url)
-        else:
-            self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.extra = kwargs
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.client = self._build_client()
 
     def clone(self):
         return LLM(
@@ -77,6 +74,25 @@ class LLM:
             base_url=self.base_url,
             **self.extra,
         )
+
+    def _build_client(self):
+        if self.interface == "anthropic":
+            return Anthropic(api_key=self.api_key, base_url=self.base_url)
+        return OpenAI(api_key=self.api_key, base_url=self.base_url)
+
+    def reconfigure(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        interface: str,
+        base_url: str | None = None,
+    ) -> None:
+        self.model = model
+        self.api_key = api_key
+        self.interface = interface
+        self.base_url = base_url
+        self.client = self._build_client()
 
     def chat(
         self,
