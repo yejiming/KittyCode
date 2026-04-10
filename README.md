@@ -2,6 +2,28 @@
 
 KittyCode is a minimal terminal coding agent focused on a compact, readable implementation. It keeps the core runtime straightforward, with an agent loop, local tools, context compression, a small command-line interface, and support for both OpenAI-compatible and Anthropic APIs.
 
+## Get Started
+
+1. Install KittyCode:
+
+```bash
+pip install kittycode
+```
+
+2. Configure KittyCode with the guided setup:
+
+```bash
+kittycode --config
+```
+
+This is the recommended way to create or repair `~/.kittycode/config.json`.
+
+3. Start the interactive terminal UI:
+
+```bash
+kittycode
+```
+
 ## Background
 
 KittyCode is inspired by [NanoCoder](https://github.com/he-yufeng/NanoCoder) and keeps the same general idea of a small terminal coding agent while simplifying the project around the core runtime.
@@ -28,59 +50,6 @@ The project is intentionally small. It includes the core agent runtime, a compac
 
 - Python 3.10 or newer
 - An API key for either an OpenAI-compatible endpoint or an Anthropic-compatible endpoint
-
-## Installation
-
-Install from PyPI:
-
-```bash
-pip install kittycode
-```
-
-## Configuration
-
-KittyCode reads startup configuration from `~/.kittycode/config.json`.
-
-The canonical config shape stores one or more models under a top-level `models` array. Each stored model entry uses:
-
-- `interface`: runtime adapter type, currently `openai` or `anthropic`
-- `provider`: user-facing provider identity or preset label
-- `api_key`
-- `model_name`
-- `base_url`
-- `max_tokens`
-- `temperature`
-- `max_context`
-
-Example:
-
-```json
-{
-	"models": [
-		{
-			"interface": "openai",
-			"provider": "openai",
-			"api_key": "sk-...",
-			"model_name": "gpt-4o",
-			"base_url": "https://api.openai.com/v1"
-		},
-		{
-			"interface": "anthropic",
-			"provider": "anthropic",
-			"api_key": "sk-ant-...",
-			"model_name": "claude-3-7-sonnet-latest",
-			"base_url": "https://api.anthropic.com"
-		}
-	],
-	"max_tokens": 32000,
-	"temperature": 0,
-	"max_context": 200000
-}
-```
-
-At startup, KittyCode uses the first model entry as the active runtime model. `interface` decides which adapter path is used, while `provider` remains the user-facing identity for later preset and selection flows.
-
-The CLI still allows explicit runtime overrides such as `--model`, `--interface`, `--base-url`, and `--api-key`.
 
 ## Skills
 
@@ -138,10 +107,10 @@ Resume a saved session:
 kittycode -r session_1234567890
 ```
 
-Override model, interface, or endpoint from the command line:
+Run the configuration wizard:
 
 ```bash
-kittycode --interface anthropic --model claude-3-7-sonnet-latest
+kittycode --config
 ```
 
 ## Interactive Commands

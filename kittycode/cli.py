@@ -26,6 +26,7 @@ from prompt_toolkit import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.filters import has_focus
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
@@ -36,7 +37,7 @@ from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.layout.processors import Processor, Transformation
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
-from prompt_toolkit.widgets import Frame, TextArea
+from prompt_toolkit.widgets import TextArea
 from rich import box
 from rich.console import Console, Group
 from rich.markdown import Markdown
@@ -75,6 +76,7 @@ _BUILTIN_COMMANDS = {
 
 _INPUT_AREA_MIN_HEIGHT = 1
 _INPUT_AREA_MAX_HEIGHT = 8
+_INPUT_PROMPT_LABEL = ">"
 _AUTHOR_NAME = "Jimmy Ye"
 
 ROLE_STYLE = {
@@ -82,17 +84,18 @@ ROLE_STYLE = {
     "user": "class:history.user",
     "assistant": "class:history.assistant",
     "tool": "class:history.tool",
+    "startup": "class:startup.text",
 }
 
 _APP_STYLE = Style.from_dict(
     {
         "history.system": "fg:#56b6c2",
         "history.user": "fg:#27cd96",
-        "history.assistant": "fg:#d96b78",
+        "history.assistant": "fg:#d68786",
         "history.assistant.label": "bold",
         "history.tool": "fg:#56b6c2",
-        "footer": "fg:#56b6c2",
-        "footer.label": "fg:#56b6c2 bold",
+        "footer": "fg:#d68786",
+        "footer.label": "fg:#d68786 bold",
         "history.markdown.heading1": "bold underline",
         "history.markdown.heading2": "bold",
         "history.markdown.heading3": "bold",
@@ -107,6 +110,10 @@ _APP_STYLE = Style.from_dict(
         "history.markdown.code": "fg:#b6a58e",
         "history.markdown.fence": "fg:#8d98a5",
         "history.markdown.codeblock": "fg:#9ea7b2",
+        "input.rule": "fg:#6b7280",
+        "startup.text": "fg:#6b7280",
+        "startup.frame": "fg:#d68786",
+        "startup.cat": "fg:#d68786",
     }
 )
 
@@ -129,6 +136,8 @@ class HistoryStyleProcessor(Processor):
             return Transformation(
                 [(_merge_prompt_toolkit_styles(line_text and transformation_input.fragments[0][0], base_style, "class:history.assistant.label"), line_text)]
             )
+        if isinstance(metadata, dict) and metadata.get("startup"):
+            return Transformation(_style_startup_line(line_text, base_style))
         if isinstance(metadata, dict) and metadata.get("markdown"):
             return Transformation(_style_history_markdown_line(line_text, metadata))
 
@@ -168,10 +177,11 @@ def _parse_args():
         prog="kittycode",
         description="Minimal AI coding agent. Supports OpenAI-compatible and Anthropic APIs.",
     )
-    parser.add_argument("-m", "--model", help="Model name (default: value from ~/.kittycode/config.json)")
-    parser.add_argument("--interface", choices=["openai", "anthropic"], help="Interface type (default: value from ~/.kittycode/config.json)")
-    parser.add_argument("--base-url", help="API base URL (default: value from ~/.kittycode/config.json)")
-    parser.add_argument("--api-key", help="API key (default: value from ~/.kittycode/config.json)")
+    parser.add_argument("--config", action="store_true", help="Open the guided configuration setup")
+    parser.add_argument("-m", "--model", help=argparse.SUPPRESS)
+    parser.add_argument("--interface", choices=["openai", "anthropic"], help=argparse.SUPPRESS)
+    parser.add_argument("--base-url", help=argparse.SUPPRESS)
+    parser.add_argument("--api-key", help=argparse.SUPPRESS)
     parser.add_argument("-p", "--prompt", help="One-shot prompt (non-interactive mode)")
     parser.add_argument("-r", "--resume", metavar="ID", help="Resume a saved session")
     parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
@@ -298,7 +308,11 @@ def _repl(agent: Agent, config: Config):
         lambda: _slash_command_names(agent.skills),
         token_provider=lambda: (agent.llm.total_prompt_tokens, agent.llm.total_completion_tokens),
     )
-    input_reader.print(_render_startup_header(config, width=console.size.width))
+    history_width = input_reader._history_render_width() if hasattr(input_reader, "_history_render_width") else console.size.width
+    if hasattr(input_reader, "print_startup"):
+        input_reader.print_startup(_render_startup_header(config, width=history_width))
+    else:
+        input_reader.print(_render_startup_header(config, width=history_width))
     pending_skill = None
 
     def handle_submit(raw_input: str) -> None:
@@ -445,10 +459,10 @@ def _repl(agent: Agent, config: Config):
 
     try:
         if hasattr(input_reader, "run"):
-            input_reader.run(handle_submit, message="You >")
+            input_reader.run(handle_submit, message=_INPUT_PROMPT_LABEL)
         else:
             while True:
-                raw_input = input_reader.prompt("You >")
+                raw_input = input_reader.prompt(_INPUT_PROMPT_LABEL)
                 handle_submit(raw_input)
                 if raw_input.strip() == "/quit":
                     break
@@ -816,14 +830,16 @@ def _render_tool_call_details(name: str, kwargs: dict):
 
 
 def _show_tool_call(io, name: str, kwargs: dict) -> None:
-    io.print(f"\n[dim]> {_format_tool_call(name, kwargs)}[/dim]")
     io.print(_render_tool_call_details(name, kwargs))
 
 
 def _write_assistant_response(write, response: str) -> None:
     if not response:
         return
-    rendered = _render_markdown_to_plain_text(response)
+    visible_response = _filter_think_display_text(response)
+    if not visible_response:
+        return
+    rendered = _render_markdown_to_plain_text(visible_response)
     write(rendered if rendered.endswith("\n") else f"{rendered}\n")
 
 
@@ -845,6 +861,36 @@ def _render_markdown_to_plain_text(text: str, width: int | None = None) -> str:
         return ""
     terminal_width = console.size.width if width is None else width
     return _render_to_plain_text(_render_markdown(text), width=terminal_width)
+
+
+def _filter_think_display_text(text: str) -> str:
+    if not text:
+        return ""
+
+    markers = ("<think>", "</think>")
+    hidden = False
+    visible: list[str] = []
+    index = 0
+
+    while index < len(text):
+        if text.startswith("</think>", index):
+            hidden = False
+            index += len("</think>")
+            continue
+        if text.startswith("<think>", index):
+            hidden = not hidden
+            index += len("<think>")
+            continue
+
+        remainder = text[index:]
+        if remainder.startswith("<") and any(marker.startswith(remainder) for marker in markers):
+            break
+
+        if not hidden:
+            visible.append(text[index])
+        index += 1
+
+    return "".join(visible)
 
 
 def _render_markdown(text: str):
@@ -980,13 +1026,21 @@ class _MarkdownStreamRenderer:
         # live_factory accepted for backward compatibility but unused
         self._buffer = ""
         self._last_emit_at: float | None = None
+        self._last_visible_text = ""
 
     def write(self, text: str) -> None:
         if not text:
             return
         self._buffer += text
+        visible_text = _filter_think_display_text(self._buffer)
         if self._on_text is not None:
-            self._on_text(text)
+            if visible_text.startswith(self._last_visible_text):
+                delta = visible_text[len(self._last_visible_text):]
+                if delta:
+                    self._on_text(delta)
+            elif visible_text:
+                self._on_text(visible_text)
+        self._last_visible_text = visible_text
         current_time = self._now()
         if self._last_emit_at is not None and current_time - self._last_emit_at < self.refresh_interval:
             return
@@ -999,7 +1053,7 @@ class _MarkdownStreamRenderer:
         self._reset()
 
     def _render_current(self) -> None:
-        rendered = self.render(self._buffer)
+        rendered = self.render(_filter_think_display_text(self._buffer))
         rendered_text = (
             rendered
             if isinstance(rendered, str)
@@ -1018,6 +1072,7 @@ class _MarkdownStreamRenderer:
         self._buffer = ""
         self._last_emit_at = None
         self._last_emitted_text = ""
+        self._last_visible_text = ""
 
 
 def _render_startup_header(config: Config, width: int | None = None):
@@ -1027,13 +1082,19 @@ def _render_startup_header(config: Config, width: int | None = None):
     gap = 2
     min_right_width = 28
 
-    available_right = width - left_width - gap
-    if available_right < min_right_width:
-        return Text("\n".join(left_lines))
+    if width < left_width + gap + min_right_width:
+        return Text("\n".join(_startup_single_box_lines(config, width)))
 
+    available_right = width - left_width - gap
     right_lines = _startup_right_box_lines(config, available_right, target_height=len(left_lines))
     lines = _merge_columns(left_lines, right_lines, left_width, gap)
     return Text("\n".join(lines))
+
+
+def _last_line_start_offset(text: str) -> int:
+    if not text:
+        return 0
+    return text.rfind("\n") + 1
 
 
 def _startup_left_box_lines(config: Config) -> list[str]:
@@ -1046,22 +1107,80 @@ def _startup_left_box_lines(config: Config) -> list[str]:
     return _box_lines(content, inner_width=inner_width, align="center", line_alignments=alignments)
 
 
-def _startup_right_box_lines(config: Config, total_width: int, target_height: int | None = None) -> list[str]:
-    content_width = max(total_width - 14, 24)
+def _startup_single_box_lines(config: Config, total_width: int) -> list[str]:
+    left_lines = _startup_left_box_lines(config)
+    left_width = max(_visible_width(line) for line in left_lines)
+    if total_width >= left_width:
+        return left_lines
+    return _startup_compact_box_lines(config, total_width)
+
+
+def _startup_compact_box_lines(config: Config, total_width: int) -> list[str]:
     content = [
+        f"KittyCode v{__version__}",
+        f"Model: {config.model}",
+    ]
+    if total_width < 16:
+        return _startup_minimal_lines(content, total_width)
+
+    available_content_width = max(total_width - 4, 12)
+    wrapped: list[str] = []
+    for line in content:
+        wrapped.extend(
+            textwrap.wrap(
+                line,
+                width=available_content_width,
+                break_long_words=True,
+                break_on_hyphens=False,
+            ) or [""]
+        )
+    inner_width = min(max(max(_visible_width(line) for line in wrapped), 12), available_content_width)
+    return _box_lines(wrapped, inner_width=inner_width, align="center")
+
+
+def _startup_minimal_lines(content: list[str], total_width: int) -> list[str]:
+    width = max(total_width, 1)
+    lines: list[str] = []
+    for line in content:
+        wrapped = textwrap.wrap(
+            line,
+            width=width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        ) or [""]
+        for segment in wrapped:
+            truncated = _truncate_to_width(segment, width)
+            lines.append(_pad_visible(truncated, width, align="center"))
+    return lines
+
+
+def _startup_right_box_lines(config: Config, total_width: int, target_height: int | None = None) -> list[str]:
+    box_chrome_width = 4
+    available_content_width = max(total_width - box_chrome_width, 1)
+    min_content_width = max(min(available_content_width, total_width // 2), 12)
+    raw_content = [
         f"Interface: {config.interface}",
         f"Base: {config.base_url or 'default'}",
     ]
     startup_hint = "Type /help for commands, press Esc to interrupt a run, /quit to exit."
-    content.extend(
-        line for line in textwrap.wrap(
+    raw_content.extend(
+        textwrap.wrap(
             startup_hint,
-            width=max(content_width, 1),
+            width=available_content_width,
             break_long_words=False,
             break_on_hyphens=False,
         )
     )
-    inner_width = min(max(max(_visible_width(line) for line in content), 24), content_width)
+    content: list[str] = []
+    for line in raw_content:
+        wrapped = textwrap.wrap(
+            line,
+            width=available_content_width,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        content.extend(wrapped or [""])
+    inner_width = min(max(max(_visible_width(line) for line in content), min_content_width), available_content_width)
     return _box_lines(content, inner_width=inner_width, align="left", target_height=target_height)
 
 
@@ -1176,6 +1295,54 @@ def _style_inline_markdown(text: str, base_style: str, raw_text: str | None = No
             fragments.append((_merge_prompt_toolkit_styles(base_style, "class:history.markdown.emphasis"), display))
         else:
             fragments.append((base_style, part))
+    return fragments
+
+
+def _style_startup_line(text: str, base_style: str):
+    if not text:
+        return [(base_style, text)]
+
+    for marker in ("╮  ╭", "│  │", "╯  ╰"):
+        split_at = text.find(marker)
+        if split_at >= 0:
+            left = text[:split_at + 1]
+            gap = text[split_at + 1:split_at + 3]
+            right = text[split_at + 3:]
+            return [
+                *_style_startup_left_segment(left, base_style),
+                (base_style, gap),
+                *_style_startup_right_segment(right, base_style),
+            ]
+
+    return _style_startup_left_segment(text, base_style)
+
+
+def _style_startup_left_segment(text: str, base_style: str):
+    fragments = []
+    frame_chars = set("╭╮╰╯─│")
+    is_cat_line = any(marker in text for marker in ("/\\_/\\\\", "( o.o )", "> ^", "/_ __ ___ ___/", "\\_/   V \\_\\"))
+
+    for char in text:
+        if char in frame_chars:
+            fragments.append((_merge_prompt_toolkit_styles(base_style, "class:startup.frame"), char))
+        elif is_cat_line and char != " ":
+            fragments.append((_merge_prompt_toolkit_styles(base_style, "class:startup.cat"), char))
+        else:
+            fragments.append((base_style, char))
+    return fragments
+
+
+def _style_startup_right_segment(text: str, base_style: str):
+    if not text:
+        return [(base_style, text)]
+
+    fragments = []
+    frame_chars = set("╭╮╰╯─│")
+    for char in text:
+        if char in frame_chars:
+            fragments.append((_merge_prompt_toolkit_styles(base_style, "class:startup.frame"), char))
+        else:
+            fragments.append((base_style, char))
     return fragments
 
 
@@ -1343,6 +1510,8 @@ def _build_history_line_metadata(item: _HistoryItem, rendered: str) -> list[dict
 
     for index, line in enumerate(lines):
         line_metadata: dict[str, object] = {"base_style": base_style}
+        if item.role == "startup":
+            line_metadata["startup"] = True
         if assistant_label_present and index == 0:
             line_metadata["label"] = True
         if item.role == "assistant" and item.kind == "markdown" and index >= markdown_start_index:
@@ -1373,6 +1542,8 @@ def render_message_to_text(role: str, kind: str, text: str, width: int = 80) -> 
         highlight=False,
     )
     body = text or ""
+    if role == "assistant":
+        body = _filter_think_display_text(body)
 
     with render_console.capture() as capture:
         if role == "user":
@@ -1407,9 +1578,10 @@ class _ReadlineInput:
         self._transient_output: _HistoryItem | None = None
         self._live_tool_output_lines: list[str] = []
 
-        self._prompt_label = "You >"
-        self._chat_prompt_label = "You >"
-        self._input_frame: Frame | None = None
+        self._prompt_label = _INPUT_PROMPT_LABEL
+        self._chat_prompt_label = _INPUT_PROMPT_LABEL
+        self._input_top_rule_window: Window | None = None
+        self._input_bottom_rule_window: Window | None = None
 
         self._submit_handler = None
         self._busy = False
@@ -1439,7 +1611,7 @@ class _ReadlineInput:
 
         self.input_area = TextArea(
             height=self._input_area_height,
-            prompt=f"{self._prompt_label} ",
+            prompt=self._input_prompt_fragments(),
             multiline=True,
             wrap_lines=True,
             completer=self.completer,
@@ -1451,7 +1623,16 @@ class _ReadlineInput:
         self.input_buffer.on_text_changed += self._handle_input_text_changed
         self.session = SimpleNamespace(completer=self.completer, history=self.history)
 
-        self._input_frame = Frame(self.input_area, title=self._prompt_label)
+        self._input_top_rule_window = Window(
+            content=FormattedTextControl(self._render_input_rule_fragments, focusable=False, show_cursor=False),
+            height=1,
+            dont_extend_height=True,
+        )
+        self._input_bottom_rule_window = Window(
+            content=FormattedTextControl(self._render_input_rule_fragments, focusable=False, show_cursor=False),
+            height=1,
+            dont_extend_height=True,
+        )
         self.footer_window = Window(
             content=FormattedTextControl(self._render_footer_fragments, focusable=False, show_cursor=False),
             height=1,
@@ -1463,7 +1644,9 @@ class _ReadlineInput:
                 content=HSplit(
                     [
                         self.history_window,
-                        self._input_frame,
+                        self._input_top_rule_window,
+                        self.input_area,
+                        self._input_bottom_rule_window,
                         self.footer_window,
                     ]
                 ),
@@ -1496,7 +1679,7 @@ class _ReadlineInput:
     # -------------------------
     # lifecycle
     # -------------------------
-    def run(self, on_submit, message: str = "You >") -> None:
+    def run(self, on_submit, message: str = _INPUT_PROMPT_LABEL) -> None:
         self._submit_handler = on_submit
         self._chat_prompt_label = message
         self._set_prompt_label(message)
@@ -1553,6 +1736,9 @@ class _ReadlineInput:
     # -------------------------
     def print(self, value):
         self._call_in_ui_thread(lambda: self._print_ui(value), wait=False)
+
+    def print_startup(self, value):
+        self._call_in_ui_thread(lambda: self._print_startup_ui(value), wait=False)
 
     def write(self, text: str):
         self._call_in_ui_thread(lambda: self._write_ui(text), wait=False)
@@ -1674,11 +1860,16 @@ class _ReadlineInput:
     # -------------------------
     # prompt / history helpers
     # -------------------------
+    def _input_prompt_fragments(self):
+        return FormattedText([("bold", f"{self._prompt_label} ")])
+
+    def _render_input_rule_fragments(self):
+        width = self._window_render_width(None, fallback_padding=0)
+        return [("class:input.rule", "─" * max(width, 1))]
+
     def _set_prompt_label(self, message: str) -> None:
-        self._prompt_label = message
-        if self._input_frame is not None:
-            self._input_frame.title = message
-        self.input_area.prompt = f"{message} "
+        self._prompt_label = _INPUT_PROMPT_LABEL
+        self.input_area.prompt = self._input_prompt_fragments()
         self._update_input_area_height_ui()
         self.application.invalidate()
 
@@ -1748,10 +1939,7 @@ class _ReadlineInput:
         self.application.invalidate()
 
     def _input_area_content_width(self) -> int:
-        try:
-            return max(self.application.output.get_size().columns - 6, 1)
-        except Exception:
-            return max(console.size.width - 6, 1)
+        return self._window_render_width(self.input_area.window, fallback_padding=6)
 
     def _render_footer_fragments(self):
         read_tokens, write_tokens = self.token_provider()
@@ -1787,6 +1975,14 @@ class _ReadlineInput:
         self._finalize_transient_output_ui()
         self._append_history_item_ui(
             "system",
+            "plain",
+            _render_to_plain_text(value, width=self._history_render_width()),
+        )
+
+    def _print_startup_ui(self, value):
+        self._finalize_transient_output_ui()
+        self._append_history_item_ui(
+            "startup",
             "plain",
             _render_to_plain_text(value, width=self._history_render_width()),
         )
@@ -1903,16 +2099,25 @@ class _ReadlineInput:
         self._history_line_metadata = line_metadata or [{}]
 
         self.history_buffer.set_document(
-            Document(text=text),
+            Document(text=text, cursor_position=_last_line_start_offset(text)),
             bypass_readonly=True,
         )
         self.application.invalidate()
 
     def _history_render_width(self) -> int:
+        return self._window_render_width(self.history_window, fallback_padding=4)
+
+    def _window_render_width(self, window, fallback_padding: int) -> int:
+        if window is not None:
+            render_info = getattr(window, "render_info", None)
+            if render_info is not None:
+                window_width = getattr(render_info, "window_width", 0)
+                if window_width:
+                    return max(window_width, 1)
         try:
-            return self.application.output.get_size().columns - 4
+            return max(self.application.output.get_size().columns - fallback_padding, 1)
         except Exception:
-            return console.size.width - 4
+            return max(console.size.width - fallback_padding, 1)
 
     # -------------------------
     # scheduler
