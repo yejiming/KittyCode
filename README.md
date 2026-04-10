@@ -41,45 +41,46 @@ pip install kittycode
 
 KittyCode reads startup configuration from `~/.kittycode/config.json`.
 
-Supported fields:
+The canonical config shape stores one or more models under a top-level `models` array. Each stored model entry uses:
 
-- `interface`: `openai` or `anthropic`
+- `interface`: runtime adapter type, currently `openai` or `anthropic`
+- `provider`: user-facing provider identity or preset label
 - `api_key`
-- `model`
+- `model_name`
 - `base_url`
 - `max_tokens`
 - `temperature`
 - `max_context`
 
-OpenAI-compatible example:
+Example:
 
 ```json
 {
-	"interface": "openai",
-	"api_key": "sk-...",
-	"model": "gpt-4o",
-	"base_url": "https://api.openai.com/v1",
-	"max_tokens": 4096,
+	"models": [
+		{
+			"interface": "openai",
+			"provider": "openai",
+			"api_key": "sk-...",
+			"model_name": "gpt-4o",
+			"base_url": "https://api.openai.com/v1"
+		},
+		{
+			"interface": "anthropic",
+			"provider": "anthropic",
+			"api_key": "sk-ant-...",
+			"model_name": "claude-3-7-sonnet-latest",
+			"base_url": "https://api.anthropic.com"
+		}
+	],
+	"max_tokens": 32000,
 	"temperature": 0,
-	"max_context": 128000
+	"max_context": 200000
 }
 ```
 
-Anthropic example:
+At startup, KittyCode uses the first model entry as the active runtime model. `interface` decides which adapter path is used, while `provider` remains the user-facing identity for later preset and selection flows.
 
-```json
-{
-	"interface": "anthropic",
-	"api_key": "sk-ant-...",
-	"model": "claude-3-7-sonnet-latest",
-	"base_url": "https://api.anthropic.com",
-	"max_tokens": 4096,
-	"temperature": 0,
-	"max_context": 128000
-}
-```
-
-The CLI still allows explicit overrides such as `--model`, `--interface`, `--base-url`, and `--api-key`.
+The CLI still allows explicit runtime overrides such as `--model`, `--interface`, `--base-url`, and `--api-key`.
 
 ## Skills
 

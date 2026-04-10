@@ -87,7 +87,7 @@ ROLE_STYLE = {
 _APP_STYLE = Style.from_dict(
     {
         "history.system": "fg:#56b6c2",
-        "history.user": "fg:#27cd96 bold",
+        "history.user": "fg:#27cd96",
         "history.assistant": "fg:#d96b78",
         "history.assistant.label": "bold",
         "history.tool": "fg:#56b6c2",
@@ -183,6 +183,7 @@ def _load_config() -> Config:
         return Config.from_file()
     except ValueError as exc:
         console.print(f"[red bold]Invalid config file:[/] {CONFIG_PATH}")
+        console.print("Run `kittycode --config` to create or repair your model configuration.")
         console.print(str(exc))
         sys.exit(1)
 
@@ -339,12 +340,11 @@ def _repl(agent: Agent, config: Config):
                 f"[cyan]{completion_tokens}[/cyan] completion = [bold]{prompt_tokens + completion_tokens}[/bold] total"
             )
             return
+        if user_input == "/model":
+            _run_model_selector(input_reader, agent, config)
+            return
         if user_input.startswith("/model "):
-            new_model = user_input[7:].strip()
-            if new_model:
-                agent.llm.model = new_model
-                config.model = new_model
-                input_reader.print(f"Switched to [cyan]{new_model}[/cyan]")
+            input_reader.print("[yellow]Use /model to open the selector.[/yellow]")
             return
         if user_input == "/compact":
             from .runtime.context import estimate_tokens
@@ -465,7 +465,7 @@ def _show_help(io=None):
             "  /reset         Clear conversation history\n"
             "  /skills        Show loaded local skills\n"
             "  /<skill name>  Use a loaded skill\n"
-            "  /model <name>  Switch model mid-conversation\n"
+            "  /model         Switch model mid-conversation\n"
             "  /tokens        Show token usage\n"
             "  /compact       Compress conversation context\n"
             "  /save          Save session to disk\n"
@@ -480,6 +480,69 @@ def _show_help(io=None):
 def _show_skills(skills, io=None):
     io = io or _build_input_reader(os.path.expanduser("~/.kittycode_history"), lambda: list(_BUILTIN_COMMANDS))
     io.print(Panel(_format_skills(skills), title="KittyCode Skills", border_style="dim"))
+
+
+def _format_model_choices(config: Config) -> tuple[list[str], str | None]:
+    active_index = config.active_model_index()
+    lines = ["Provider | Model"]
+
+    for index, model in enumerate(config.models, 1):
+        marker = "*" if active_index == index - 1 else " "
+        lines.append(f"{index}. {marker} {model.provider} | {model.model_name}")
+
+    notices: list[str] = []
+    if active_index is None and config.models:
+        notices.append("Current runtime is outside the configured model list.")
+    if len(config.models) == 1:
+        notices.append("Only one configured model is available, so switching is unavailable.")
+
+    return lines, " ".join(notices) if notices else None
+
+
+def _select_model_index(io, config: Config) -> int | None:
+    lines, notice = _format_model_choices(config)
+    io.print("\n".join(lines))
+    if notice:
+        io.print(f"[dim]{notice}[/dim]")
+
+    if len(config.models) <= 1:
+        return None
+
+    while True:
+        try:
+            raw = io.prompt("Model >").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+        if not raw:
+            return None
+        if raw.isdigit():
+            index = int(raw) - 1
+            if 0 <= index < len(config.models):
+                return index
+
+        io.print(f"[yellow]Choose a model number between 1 and {len(config.models)}.[/yellow]")
+
+
+def _run_model_selector(io, agent: Agent, config: Config) -> None:
+    selected_index = _select_model_index(io, config)
+    if selected_index is None:
+        return
+
+    if config.active_model_index() == selected_index:
+        selected = config.models[selected_index]
+        io.print(f"[dim]Already using [cyan]{selected.provider}/{selected.model_name}[/cyan][/dim]")
+        return
+
+    selected = config.activate_model(selected_index)
+    agent.llm.reconfigure(
+        model=selected.model_name,
+        api_key=selected.api_key,
+        interface=selected.interface,
+        base_url=selected.base_url,
+    )
+    config.write()
+    io.print(f"Switched to [cyan]{selected.provider}/{selected.model_name}[/cyan]")
 
 
 def _format_skills(skills) -> str:
@@ -1222,6 +1285,12 @@ def _classify_rendered_markdown_line(
 
     previous_line = rendered_lines[index - 1] if index > 0 else ""
     next_line = rendered_lines[index + 1] if index + 1 < len(rendered_lines) else ""
+    if pending_heading_indexes:
+        first_heading = pending_heading_indexes[0]
+        if index >= first_heading:
+            pending_heading_indexes.pop(0)
+            return "heading"
+
     if (
         pending_codeblock_indexes
         and line.startswith(" ")
@@ -1230,12 +1299,6 @@ def _classify_rendered_markdown_line(
     ):
         pending_codeblock_indexes.pop(0)
         return "codeblock"
-
-    if pending_heading_indexes:
-        first_heading = pending_heading_indexes[0]
-        if index >= first_heading:
-            pending_heading_indexes.pop(0)
-            return "heading"
 
     if any(char in line for char in "│╷╵╶╴┼├┤┬┴╭╮╰╯"):
         return "table"
@@ -1258,6 +1321,8 @@ def _build_history_line_metadata(item: _HistoryItem, rendered: str) -> list[dict
         "quote": [],
         "heading": [],
     }
+    assistant_label_present = bool(item.role == "assistant" and lines and lines[0] == "KittyCode")
+    markdown_start_index = 1 if assistant_label_present else 0
 
     if item.role == "assistant" and item.kind == "markdown":
         in_fenced_block = False
@@ -1267,7 +1332,10 @@ def _build_history_line_metadata(item: _HistoryItem, rendered: str) -> list[dict
             if raw_line.strip() and markdown_kind in pending_inline_raw_lines:
                 pending_inline_raw_lines[markdown_kind].append(raw_line)
 
-        nonempty_rendered_indexes = [index for index, line in enumerate(lines) if index > 0 and line.strip()]
+        nonempty_rendered_indexes = [
+            index for index, line in enumerate(lines)
+            if index >= markdown_start_index and line.strip()
+        ]
         heading_count = raw_kinds.count("heading")
         codeblock_count = raw_kinds.count("codeblock")
         pending_heading_indexes = nonempty_rendered_indexes[:heading_count]
@@ -1275,9 +1343,9 @@ def _build_history_line_metadata(item: _HistoryItem, rendered: str) -> list[dict
 
     for index, line in enumerate(lines):
         line_metadata: dict[str, object] = {"base_style": base_style}
-        if item.role == "assistant" and index == 0:
+        if assistant_label_present and index == 0:
             line_metadata["label"] = True
-        if item.role == "assistant" and item.kind == "markdown" and index > 0:
+        if item.role == "assistant" and item.kind == "markdown" and index >= markdown_start_index:
             markdown_kind = _classify_rendered_markdown_line(
                 line,
                 index,
@@ -1308,10 +1376,8 @@ def render_message_to_text(role: str, kind: str, text: str, width: int = 80) -> 
 
     with render_console.capture() as capture:
         if role == "user":
-            render_console.print("You")
-            render_console.print(Text(body))
+            render_console.print(Text("> " + body))
         elif role == "assistant":
-            render_console.print("KittyCode")
             if kind == "markdown":
                 render_console.print(_render_markdown(body))
             else:
