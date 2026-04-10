@@ -2,6 +2,8 @@
 
 KittyCode is a minimal terminal coding agent focused on a compact, readable implementation. It keeps the core runtime straightforward, with an agent loop, local tools, context compression, a small command-line interface, and support for both OpenAI-compatible and Anthropic APIs.
 
+![KittyCode startup screenshot](docs/assets/kittycode-home.png)
+
 ## Get Started
 
 1. Install KittyCode:

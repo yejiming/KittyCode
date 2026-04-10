@@ -2,6 +2,8 @@
 
 KittyCode 是一个运行在终端里的轻量级 AI 编程代理，目标是在尽量精简代码的前提下保留清晰、直接的核心运行逻辑，包括主代理循环、本地工具调用、上下文压缩、命令行交互，以及对 OpenAI 兼容接口和 Anthropic 接口的支持。
 
+![KittyCode 启动截图](docs/assets/kittycode-home.png)
+
 ## 快速开始
 
 1. 安装 KittyCode：
