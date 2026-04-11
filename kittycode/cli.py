@@ -79,6 +79,11 @@ _INPUT_AREA_MAX_HEIGHT = 8
 _INPUT_PROMPT_LABEL = ">"
 _AUTHOR_NAME = "Jimmy Ye"
 
+
+def _default_history_path() -> str:
+    return os.path.expanduser("~/.kittycode/.history")
+
+
 ROLE_STYLE = {
     "system": "class:history.system",
     "user": "class:history.user",
@@ -304,9 +309,14 @@ def _run_once(agent: Agent, prompt: str):
 
 def _repl(agent: Agent, config: Config):
     input_reader = _build_input_reader(
-        os.path.expanduser("~/.kittycode_history"),
+        _default_history_path(),
         lambda: _slash_command_names(agent.skills),
-        token_provider=lambda: (agent.llm.total_prompt_tokens, agent.llm.total_completion_tokens),
+        token_provider=lambda: (
+            getattr(agent.llm, "total_prompt_uncache_tokens", 0),
+            getattr(agent.llm, "total_prompt_cache_tokens", 0),
+            getattr(agent.llm, "total_completion_uncache_tokens", 0),
+            getattr(agent.llm, "total_completion_cache_tokens", 0),
+        ),
     )
     history_width = input_reader._history_render_width() if hasattr(input_reader, "_history_render_width") else console.size.width
     if hasattr(input_reader, "print_startup"):
@@ -347,11 +357,14 @@ def _repl(agent: Agent, config: Config):
             _show_skills(agent.skills, input_reader)
             return
         if user_input == "/tokens":
-            prompt_tokens = agent.llm.total_prompt_tokens
-            completion_tokens = agent.llm.total_completion_tokens
+            prompt_tokens = getattr(agent.llm, "total_prompt_uncache_tokens", 0)
+            prompt_cache_tokens = getattr(agent.llm, "total_prompt_cache_tokens", 0)
+            completion_tokens = getattr(agent.llm, "total_completion_uncache_tokens", 0)
+            completion_cache_tokens = getattr(agent.llm, "total_completion_cache_tokens", 0)
             input_reader.print(
-                f"Tokens used this session: [cyan]{prompt_tokens}[/cyan] prompt + "
-                f"[cyan]{completion_tokens}[/cyan] completion = [bold]{prompt_tokens + completion_tokens}[/bold] total"
+                "Tokens used this session: "
+                f"input=[cyan]{prompt_tokens}[/cyan] (+[cyan]{prompt_cache_tokens}[/cyan] cached, total: [bold]{prompt_tokens + prompt_cache_tokens}[/bold]) "
+                f"output=[cyan]{completion_tokens}[/cyan] (+[cyan]{completion_cache_tokens}[/cyan] cached, total: [bold]{completion_tokens + completion_cache_tokens}[/bold])"
             )
             return
         if user_input == "/model":
@@ -471,7 +484,7 @@ def _repl(agent: Agent, config: Config):
     
 
 def _show_help(io=None):
-    io = io or _build_input_reader(os.path.expanduser("~/.kittycode_history"), lambda: list(_BUILTIN_COMMANDS))
+    io = io or _build_input_reader(_default_history_path(), lambda: list(_BUILTIN_COMMANDS))
     io.print(
         Panel(
             "[bold]Commands:[/bold]\n"
@@ -492,7 +505,7 @@ def _show_help(io=None):
 
 
 def _show_skills(skills, io=None):
-    io = io or _build_input_reader(os.path.expanduser("~/.kittycode_history"), lambda: list(_BUILTIN_COMMANDS))
+    io = io or _build_input_reader(_default_history_path(), lambda: list(_BUILTIN_COMMANDS))
     io.print(Panel(_format_skills(skills), title="KittyCode Skills", border_style="dim"))
 
 
@@ -864,33 +877,9 @@ def _render_markdown_to_plain_text(text: str, width: int | None = None) -> str:
 
 
 def _filter_think_display_text(text: str) -> str:
-    if not text:
-        return ""
+    from .llm.provider import _strip_think_blocks
 
-    markers = ("<think>", "</think>")
-    hidden = False
-    visible: list[str] = []
-    index = 0
-
-    while index < len(text):
-        if text.startswith("</think>", index):
-            hidden = False
-            index += len("</think>")
-            continue
-        if text.startswith("<think>", index):
-            hidden = not hidden
-            index += len("<think>")
-            continue
-
-        remainder = text[index:]
-        if remainder.startswith("<") and any(marker.startswith(remainder) for marker in markers):
-            break
-
-        if not hidden:
-            visible.append(text[index])
-        index += 1
-
-    return "".join(visible)
+    return _strip_think_blocks(text)
 
 
 def _render_markdown(text: str):
@@ -1569,7 +1558,7 @@ class _ReadlineInput:
     def __init__(self, history_path: str, command_provider, token_provider=None):
         self.history_path = history_path
         self.command_provider = command_provider
-        self.token_provider = token_provider or (lambda: (0, 0))
+        self.token_provider = token_provider or (lambda: (0, 0, 0, 0))
 
         self.history = FileHistory(history_path)
         self.completer = SlashCommandCompleter(command_provider)
@@ -1942,13 +1931,16 @@ class _ReadlineInput:
         return self._window_render_width(self.input_area.window, fallback_padding=6)
 
     def _render_footer_fragments(self):
-        read_tokens, write_tokens = self.token_provider()
+        read_tokens, read_cache_tokens, write_tokens, write_cache_tokens = self.token_provider()
         width = self._footer_width()
         text = _compose_footer_line(
             width=width,
             left=f"KittyCode v{__version__}",
             center=f"Author: {_AUTHOR_NAME}",
-            right=f"Read: {read_tokens}  Write: {write_tokens}",
+            right=(
+                f"input={read_tokens} (+{read_cache_tokens} cached) "
+                f"output={write_tokens} (+{write_cache_tokens} cached)"
+            ),
         )
         return [("class:footer", text)]
 
@@ -2223,7 +2215,7 @@ def _compose_footer_line(width: int, left: str, center: str, right: str) -> str:
                 line[position] = char
 
     left_budget = max(min(get_cwidth(left), width // 4), min(width // 5, 12))
-    right_budget = max(min(get_cwidth(right), width // 2), min(width // 3, 24))
+    right_budget = max(min(get_cwidth(right), (width * 2) // 3), min(width // 2, 24))
     left_text = _truncate_to_width(left, max(left_budget, 1))
     right_text = _truncate_to_width(right, max(right_budget, 1))
 

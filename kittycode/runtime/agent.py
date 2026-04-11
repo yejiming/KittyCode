@@ -232,7 +232,7 @@ class Agent:
         return [{"role": "system", "content": self._system}] + self.messages
 
     def _build_user_message(self, user_input: str) -> str:
-        return user_prompt(user_input, self.skills, self.todos)
+        return user_prompt(user_input, self.todos)
 
     def _tool_schemas(self) -> list[dict]:
         return [tool.schema() for tool in self.tools]
@@ -356,7 +356,7 @@ class Agent:
 
     def _initialize_prompt_state(self) -> None:
         self.skills = load_skills(force_reload=True)
-        self._system = system_prompt(self.tools)
+        self._system = system_prompt(self.tools, self.skills)
 
     def refresh_skills(self, force_reload: bool = False):
         """Compatibility shim for startup-only skill loading.

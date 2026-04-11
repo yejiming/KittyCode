@@ -16,6 +16,36 @@ from ..runtime.interrupts import CancellationRequested
 logger = logging.getLogger(__name__)
 
 
+def _strip_think_blocks(text: str) -> str:
+    if not text:
+        return ""
+
+    markers = ("<think>", "</think>")
+    hidden = False
+    visible: list[str] = []
+    index = 0
+
+    while index < len(text):
+        if text.startswith("</think>", index):
+            hidden = False
+            index += len("</think>")
+            continue
+        if text.startswith("<think>", index):
+            hidden = not hidden
+            index += len("<think>")
+            continue
+
+        remainder = text[index:]
+        if remainder.startswith("<") and any(marker.startswith(remainder) for marker in markers):
+            break
+
+        if not hidden:
+            visible.append(text[index])
+        index += 1
+
+    return "".join(visible)
+
+
 @dataclass
 class ToolCall:
     id: str
@@ -29,10 +59,14 @@ class LLMResponse:
     tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    prompt_cache_tokens: int = 0
+    completion_cache_tokens: int = 0
+    prompt_uncache_tokens: int = 0
+    completion_uncache_tokens: int = 0
 
     @property
     def message(self) -> dict:
-        message: dict = {"role": "assistant", "content": self.content or None}
+        message: dict = {"role": "assistant", "content": _strip_think_blocks(self.content) or None}
         if self.tool_calls:
             message["tool_calls"] = [
                 {
@@ -64,6 +98,10 @@ class LLM:
         self.extra = kwargs
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.total_prompt_cache_tokens = 0
+        self.total_completion_cache_tokens = 0
+        self.total_prompt_uncache_tokens = 0
+        self.total_completion_uncache_tokens = 0
         self.client = self._build_client()
 
     def clone(self):
@@ -128,6 +166,10 @@ class LLM:
         response = _openai_stream_to_response(stream, on_token=on_token, cancel_event=cancel_event)
         self.total_prompt_tokens += response.prompt_tokens
         self.total_completion_tokens += response.completion_tokens
+        self.total_prompt_cache_tokens += response.prompt_cache_tokens
+        self.total_completion_cache_tokens += response.completion_cache_tokens
+        self.total_prompt_uncache_tokens += response.prompt_uncache_tokens
+        self.total_completion_uncache_tokens += response.completion_uncache_tokens
         return response
 
     def _call_openai_stream(self, params: dict, cancel_event=None):
@@ -161,12 +203,17 @@ class LLM:
             params["system"] = system_message
         if tools:
             params["tools"] = _to_anthropic_tools(tools)
+        params["cache_control"] = {"type": "ephemeral"}
 
         message = self._call_anthropic_with_retry(params, on_token=on_token, cancel_event=cancel_event)
         _raise_if_cancelled(cancel_event)
         response = _anthropic_message_to_response(message)
         self.total_prompt_tokens += response.prompt_tokens
         self.total_completion_tokens += response.completion_tokens
+        self.total_prompt_cache_tokens += response.prompt_cache_tokens
+        self.total_completion_cache_tokens += response.completion_cache_tokens
+        self.total_prompt_uncache_tokens += response.prompt_uncache_tokens
+        self.total_completion_uncache_tokens += response.completion_uncache_tokens
         return response
 
     def _call_with_retry(self, params: dict, max_retries: int = 3, cancel_event=None):
@@ -200,6 +247,29 @@ class LLM:
                     raise
 
 
+def _usage_cached_tokens(usage, *, primary_attr: str, details_attr: str, details_key: str = "cached_tokens") -> int:
+    if usage is None:
+        return 0
+
+    direct_value = getattr(usage, primary_attr, None)
+    if isinstance(direct_value, int):
+        return direct_value
+
+    details = getattr(usage, details_attr, None)
+    if details is None:
+        return 0
+
+    if isinstance(details, dict):
+        value = details.get(details_key, 0)
+    else:
+        value = getattr(details, details_key, 0)
+    return value if isinstance(value, int) else 0
+
+
+def _uncached_tokens(total_tokens: int, cache_tokens: int) -> int:
+    return max(total_tokens - cache_tokens, 0)
+
+
 def _parse_openai_tool_calls(tool_call_map: dict[int, dict]) -> list[ToolCall]:
     parsed_tool_calls: list[ToolCall] = []
     for index in sorted(tool_call_map):
@@ -229,6 +299,8 @@ def _openai_stream_to_response(stream, on_token=None, cancel_event=None) -> LLMR
     tool_call_map: dict[int, dict] = {}
     prompt_tokens = 0
     completion_tokens = 0
+    prompt_cache_tokens = 0
+    completion_cache_tokens = 0
 
     for chunk in stream:
         _raise_if_cancelled(cancel_event)
@@ -237,6 +309,16 @@ def _openai_stream_to_response(stream, on_token=None, cancel_event=None) -> LLMR
         if usage is not None:
             prompt_tokens = getattr(usage, "prompt_tokens", prompt_tokens) or prompt_tokens
             completion_tokens = getattr(usage, "completion_tokens", completion_tokens) or completion_tokens
+            prompt_cache_tokens = _usage_cached_tokens(
+                usage,
+                primary_attr="prompt_cache_tokens",
+                details_attr="prompt_tokens_details",
+            ) or prompt_cache_tokens
+            completion_cache_tokens = _usage_cached_tokens(
+                usage,
+                primary_attr="completion_cache_tokens",
+                details_attr="completion_tokens_details",
+            ) or completion_cache_tokens
 
         choices = getattr(chunk, "choices", None)
         if not choices:
@@ -277,6 +359,10 @@ def _openai_stream_to_response(stream, on_token=None, cancel_event=None) -> LLMR
         tool_calls=_parse_openai_tool_calls(tool_call_map),
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        prompt_cache_tokens=prompt_cache_tokens,
+        completion_cache_tokens=completion_cache_tokens,
+        prompt_uncache_tokens=_uncached_tokens(prompt_tokens, prompt_cache_tokens),
+        completion_uncache_tokens=_uncached_tokens(completion_tokens, completion_cache_tokens),
     )
 
 
@@ -301,12 +387,26 @@ def _openai_completion_to_response(completion, on_token=None) -> LLMResponse:
     usage = getattr(completion, "usage", None)
     prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
     completion_tokens = getattr(usage, "completion_tokens", 0) if usage else 0
+    prompt_cache_tokens = _usage_cached_tokens(
+        usage,
+        primary_attr="prompt_cache_tokens",
+        details_attr="prompt_tokens_details",
+    )
+    completion_cache_tokens = _usage_cached_tokens(
+        usage,
+        primary_attr="completion_cache_tokens",
+        details_attr="completion_tokens_details",
+    )
 
     return LLMResponse(
         content=content,
         tool_calls=_parse_openai_tool_calls(tool_call_map),
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        prompt_cache_tokens=prompt_cache_tokens,
+        completion_cache_tokens=completion_cache_tokens,
+        prompt_uncache_tokens=_uncached_tokens(prompt_tokens, prompt_cache_tokens),
+        completion_uncache_tokens=_uncached_tokens(completion_tokens, completion_cache_tokens),
     )
 
 
@@ -423,12 +523,26 @@ def _anthropic_message_to_response(message, on_token=None) -> LLMResponse:
     usage = getattr(message, "usage", None)
     prompt_tokens = getattr(usage, "input_tokens", 0) if usage else 0
     completion_tokens = getattr(usage, "output_tokens", 0) if usage else 0
+    prompt_cache_tokens = _usage_cached_tokens(
+        usage,
+        primary_attr="cache_read_input_tokens",
+        details_attr="input_tokens_details",
+    )
+    completion_cache_tokens = _usage_cached_tokens(
+        usage,
+        primary_attr="cache_read_output_tokens",
+        details_attr="output_tokens_details",
+    )
 
     return LLMResponse(
         content="".join(content_parts),
         tool_calls=tool_calls,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        prompt_cache_tokens=prompt_cache_tokens,
+        completion_cache_tokens=completion_cache_tokens,
+        prompt_uncache_tokens=_uncached_tokens(prompt_tokens, prompt_cache_tokens),
+        completion_uncache_tokens=_uncached_tokens(completion_tokens, completion_cache_tokens),
     )
 
 

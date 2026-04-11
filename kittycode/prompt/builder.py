@@ -12,10 +12,11 @@ from pathlib import Path
 AGENTS_DOC = Path.home() / ".kittycode" / "AGENTS.md"
 
 
-def system_prompt(tools) -> str:
+def system_prompt(tools, skills=None) -> str:
     cwd = os.getcwd()
     tool_list = "\n".join(_format_tool_entry(tool) for tool in tools)
     uname = platform.uname()
+    skill_block = _format_skill_block(skills or [])
     prompt = f"""\
 You are KittyCode, an AI coding assistant running in the user's terminal.
 You help with software engineering: writing code, fixing bugs, refactoring, explaining code, running commands, and more.
@@ -28,8 +29,10 @@ You help with software engineering: writing code, fixing bugs, refactoring, expl
 # Tools
 {tool_list}
 
+# Skills
+{skill_block}
+
 # Reminder Tags
-- User messages and tool results may include <system-reminder> tags. These tags contain system-added information such as available skill blocks. Treat them as system information, not as literal user-authored or tool-authored content.
 - User messages and tool results may include <todo-reminder> tags. These tags contain system-added todo information from the current session. Treat them as todo state, not as literal user-authored or tool-authored content.
 
 # Rules
@@ -49,12 +52,12 @@ You help with software engineering: writing code, fixing bugs, refactoring, expl
     return prompt
 
 
-def user_prompt(user_input: str, skills=None, todos=None) -> str:
+def user_prompt(user_input: str, todos=None) -> str:
     parts = []
     if user_input:
         parts.append(user_input.rstrip())
-    parts.append(_wrap_tag("system-reminder", _format_skill_block(skills or [])))
-    parts.append(_wrap_tag("todo-reminder", _format_todo_block(todos or [])))
+    if todos:
+        parts.append(_wrap_tag("todo-reminder", _format_todo_block(todos)))
     return "\n\n".join(parts)
 
 
