@@ -35,6 +35,7 @@ from kittycode.cli import (
     _normalize_output_text,
     _parse_question_answer,
     _parse_args,
+    _default_history_path,
     _load_config,
     _render_brief_attachments,
     _render_markdown_to_plain_text,
@@ -280,6 +281,10 @@ def test_build_input_reader_keeps_history_path():
     assert reader.history_buffer is not None
 
 
+def test_default_history_path_uses_kittycode_hidden_history_file():
+    assert _default_history_path() == str(Path.home() / ".kittycode" / ".history")
+
+
 def test_build_input_reader_uses_prompt_toolkit_session():
     reader = _build_input_reader("/tmp/kittycode-history", lambda: {"/help", "/quit"})
 
@@ -327,31 +332,31 @@ def test_compose_footer_line_places_left_center_and_right_sections():
         width=100,
         left="KittyCode v1.0.0",
         center="Author: Jimmy Ye",
-        right="Read: 10  Write: 5",
+        right="input=10 (+20 cached) output=5 (+6 cached)",
     )
 
     assert len(line) == 100
     assert "KittyCode v1.0.0" in line
     assert "Author: Jimmy Ye" in line
-    assert "Read: 10  Write: 5" in line
+    assert "input=10 (+20 cached) output=5 (+6 cached)" in line
 
 
 def test_compose_footer_line_prioritizes_wider_right_token_section():
     line = _compose_footer_line(
-        width=100,
+        width=170,
         left="KittyCode v1.0.0",
         center="Author: Jimmy Ye",
-        right="Read: 123456789012345  Write: 987654321098765",
+        right="input=123456789012345 (+111111111111111 cached) output=987654321098765 (+222222222222222 cached)",
     )
 
-    assert "Read: 123456789012345  Write: 987654321098765" in line
+    assert "input=123456789012345 (+111111111111111 cached) output=987654321098765 (+222222222222222 cached)" in line
 
 
 def test_reader_footer_shows_version_author_and_token_totals():
     reader = _build_input_reader(
         "/tmp/kittycode-history",
         lambda: {"/help", "/quit"},
-        token_provider=lambda: (10, 5),
+        token_provider=lambda: (10, 20, 5, 6),
     )
     reader.application.output = SimpleNamespace(get_size=lambda: SimpleNamespace(columns=100))
 
@@ -360,7 +365,7 @@ def test_reader_footer_shows_version_author_and_token_totals():
 
     assert "KittyCode v" in footer_text
     assert "Author: Jimmy Ye" in footer_text
-    assert "Read: 10  Write: 5" in footer_text
+    assert "input=10 (+20 cached) output=5 (+6 cached)" in footer_text
     assert "Total:" not in footer_text
 
 
@@ -1490,7 +1495,9 @@ def test_repl_command_controls_render_via_reader_print(monkeypatch):
         llm=SimpleNamespace(
             model="gpt-4o",
             total_prompt_tokens=10,
+            total_prompt_cache_tokens=3,
             total_completion_tokens=5,
+            total_completion_cache_tokens=2,
             reconfigure=lambda **kwargs: reconfigured.append(kwargs),
         ),
         messages=[{"role": "user", "content": "hi"}],
@@ -1567,7 +1574,9 @@ def test_repl_model_command_shows_single_model_message_without_switching(monkeyp
         llm=SimpleNamespace(
             model="deepseek-chat",
             total_prompt_tokens=0,
+            total_prompt_cache_tokens=0,
             total_completion_tokens=0,
+            total_completion_cache_tokens=0,
             reconfigure=lambda **kwargs: reconfigured.append(kwargs),
         ),
         messages=[],

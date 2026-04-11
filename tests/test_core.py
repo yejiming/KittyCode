@@ -268,6 +268,7 @@ def test_provider_presets_match_requested_catalog_exactly():
         "Xiaomi MiMo",
         "ModelScope",
         "OpenRouter",
+        "Ollama",
     ]
 
 
@@ -286,6 +287,7 @@ def test_provider_presets_expose_exact_default_base_urls_and_interfaces():
         "Xiaomi MiMo": ("https://api.xiaomimimo.com/v1", "openai"),
         "ModelScope": ("https://api-inference.modelscope.cn/v1", "openai"),
         "OpenRouter": ("https://openrouter.ai/api/v1", "openai"),
+        "Ollama": ("http://localhost:11434/v1", "openai"),
     }
 
     actual = {
@@ -486,6 +488,10 @@ def test_llm_reconfigure_rebuilds_client_and_preserves_counters(monkeypatch):
     )
     llm.total_prompt_tokens = 11
     llm.total_completion_tokens = 7
+    llm.total_prompt_cache_tokens = 3
+    llm.total_completion_cache_tokens = 2
+    llm.total_prompt_uncache_tokens = 8
+    llm.total_completion_uncache_tokens = 5
 
     llm.reconfigure(
         model="claude-3-7-sonnet-latest",
@@ -500,6 +506,10 @@ def test_llm_reconfigure_rebuilds_client_and_preserves_counters(monkeypatch):
     assert llm.base_url == "https://api.anthropic.com"
     assert llm.total_prompt_tokens == 11
     assert llm.total_completion_tokens == 7
+    assert llm.total_prompt_cache_tokens == 3
+    assert llm.total_completion_cache_tokens == 2
+    assert llm.total_prompt_uncache_tokens == 8
+    assert llm.total_completion_uncache_tokens == 5
     assert llm.extra == {"max_tokens": 2048}
     assert constructed == [
         ("openai", "sk-openai", "https://api.openai.com/v1"),

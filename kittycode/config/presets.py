@@ -26,6 +26,7 @@ PROVIDER_PRESETS = (
     ProviderPreset("Xiaomi MiMo", "https://api.xiaomimimo.com/v1", "openai"),
     ProviderPreset("ModelScope", "https://api-inference.modelscope.cn/v1", "openai"),
     ProviderPreset("OpenRouter", "https://openrouter.ai/api/v1", "openai"),
+    ProviderPreset("Ollama", "http://localhost:11434/v1", "openai")
 )
 
 

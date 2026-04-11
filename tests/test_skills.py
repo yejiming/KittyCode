@@ -117,14 +117,21 @@ def test_load_skills_auto_reloads_after_change(tmp_path):
     assert second[0].description == "New description"
 
 
-def test_system_prompt_mentions_reminder_tags_instead_of_embedding_skills(monkeypatch):
+def test_system_prompt_embeds_loaded_skills_after_tools(monkeypatch):
     monkeypatch.setattr("kittycode.prompt.AGENTS_DOC", Path("/tmp/does-not-exist"))
-    prompt = system_prompt(ALL_TOOLS[:1])
+    prompt = system_prompt(
+        ALL_TOOLS[:1],
+        [SkillDefinition(name="Skill A", description="Does A", path="/tmp/skill-a")],
+    )
 
-    assert "<system-reminder>" in prompt
     assert "<todo-reminder>" in prompt
-    assert "available skill blocks" in prompt
-    assert "name: Skill A" not in prompt
+    assert "User messages and tool results may include <todo-reminder> tags." in prompt
+    assert "# Skills" in prompt
+    assert "Available skills:" in prompt
+    assert "name: Skill A" in prompt
+    assert "description: Does A" in prompt
+    assert "path: /tmp/skill-a" in prompt
+    assert "<system-reminder>" not in prompt
 
 
 def test_system_prompt_appends_agents_doc(tmp_path, monkeypatch):
@@ -138,10 +145,9 @@ def test_system_prompt_appends_agents_doc(tmp_path, monkeypatch):
     assert prompt.rstrip().endswith("Always check AGENTS last.")
 
 
-def test_user_prompt_appends_skill_and_todo_reminders():
+def test_user_prompt_appends_only_todo_reminders():
     prompt = user_prompt(
         "Inspect the repository",
-        [SkillDefinition(name="Skill A", description="Does A", path="/tmp/skill-a")],
         [
             {
                 "content": "Run tests",
@@ -152,13 +158,16 @@ def test_user_prompt_appends_skill_and_todo_reminders():
     )
 
     assert prompt.startswith("Inspect the repository")
-    assert "<system-reminder>" in prompt
-    assert "name: Skill A" in prompt
-    assert "description: Does A" in prompt
-    assert "path: /tmp/skill-a" in prompt
+    assert "<system-reminder>" not in prompt
     assert "<todo-reminder>" in prompt
     assert "[in_progress] Run tests" in prompt
     assert "active_form: Running tests" in prompt
+
+
+def test_user_prompt_omits_todo_reminder_when_todo_list_empty():
+    prompt = user_prompt("Inspect the repository", [])
+
+    assert prompt == "Inspect the repository"
 
 
 def test_agent_appends_skill_and_todo_reminders_to_chat_messages(monkeypatch):
@@ -183,12 +192,31 @@ def test_agent_appends_skill_and_todo_reminders_to_chat_messages(monkeypatch):
     assert agent.skills == [loaded_skill]
     assert reply == "done"
     assert llm.captured_messages
+    system_message = llm.captured_messages[0][0]
     user_message = llm.captured_messages[0][1]
+    assert system_message["role"] == "system"
+    assert "name: Skill B" in system_message["content"]
     assert user_message["role"] == "user"
     assert user_message["content"].startswith("hello")
-    assert "name: Skill B" in user_message["content"]
+    assert "name: Skill B" not in user_message["content"]
     assert "<todo-reminder>" in user_message["content"]
     assert "Inspect runtime" in user_message["content"]
+
+
+def test_agent_omits_todo_reminder_when_no_active_todos(monkeypatch):
+    loaded_skill = SkillDefinition(name="Skill B", description="Does B", path="/tmp/skill-b")
+    monkeypatch.setattr(
+        "kittycode.agent.load_skills",
+        lambda force_reload=False: [loaded_skill],
+    )
+
+    llm = RecordingLLM()
+    agent = Agent(llm=llm)
+
+    agent.chat("hello")
+
+    user_message = llm.captured_messages[0][1]
+    assert "<todo-reminder>" not in user_message["content"]
 
 
 def test_agent_keeps_startup_loaded_skills_each_user_turn(tmp_path, monkeypatch):
@@ -205,19 +233,19 @@ def test_agent_keeps_startup_loaded_skills_each_user_turn(tmp_path, monkeypatch)
     llm = RecordingLLM()
     agent = Agent(llm=llm)
     agent.chat("first")
-    assert "First version" in llm.captured_messages[0][1]["content"]
+    assert "First version" in llm.captured_messages[0][0]["content"]
 
     skill_doc.write_text("name: Live Skill\ndescription: Updated version\n")
 
     agent.chat("second")
-    assert "First version" in llm.captured_messages[1][-1]["content"]
-    assert "Updated version" not in llm.captured_messages[1][-1]["content"]
+    assert "First version" in llm.captured_messages[1][0]["content"]
+    assert "Updated version" not in llm.captured_messages[1][0]["content"]
 
 
 def test_agent_builds_system_prompt_only_once(monkeypatch):
     built_prompts = []
 
-    def fake_system_prompt(_tools):
+    def fake_system_prompt(_tools, _skills=None):
         built_prompts.append(f"system-{len(built_prompts) + 1}")
         return built_prompts[-1]
 

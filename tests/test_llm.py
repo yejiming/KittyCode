@@ -9,6 +9,7 @@ import pytest
 
 from kittycode.llm import (
     LLM,
+    LLMResponse,
     _anthropic_message_to_response,
     _extract_system_message,
     _openai_stream_to_response,
@@ -25,6 +26,12 @@ def test_llm_keeps_provider_methods_on_class():
     assert hasattr(LLM, "_chat_anthropic")
     assert hasattr(LLM, "_call_with_retry")
     assert hasattr(LLM, "_call_anthropic_with_retry")
+
+
+def test_llm_response_message_omits_think_blocks():
+    response = LLMResponse(content="hello<think>secret</think>world")
+
+    assert response.message == {"role": "assistant", "content": "helloworld"}
 
 
 def test_extract_system_message():
@@ -94,7 +101,12 @@ def test_anthropic_message_to_response_calls_on_token():
             SimpleNamespace(type="tool_use", id="tool-2", name="grep", input={"pattern": "x"}),
             SimpleNamespace(type="text", text="world"),
         ],
-        usage=SimpleNamespace(input_tokens=12, output_tokens=34),
+        usage=SimpleNamespace(
+            input_tokens=12,
+            output_tokens=34,
+            cache_read_input_tokens=5,
+            cache_read_output_tokens=6,
+        ),
     )
 
     response = _anthropic_message_to_response(message, on_token=seen.append)
@@ -104,6 +116,10 @@ def test_anthropic_message_to_response_calls_on_token():
     assert response.tool_calls[0].arguments == {"pattern": "x"}
     assert response.prompt_tokens == 12
     assert response.completion_tokens == 34
+    assert response.prompt_cache_tokens == 5
+    assert response.completion_cache_tokens == 6
+    assert response.prompt_uncache_tokens == 7
+    assert response.completion_uncache_tokens == 28
     assert seen == ["hello ", "world"]
 
 
@@ -190,7 +206,12 @@ def test_openai_stream_to_response_reads_streamed_tool_calls():
                 ],
             ),
             SimpleNamespace(
-                usage=SimpleNamespace(prompt_tokens=12, completion_tokens=34),
+                usage=SimpleNamespace(
+                    prompt_tokens=12,
+                    completion_tokens=34,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=7),
+                    completion_tokens_details=SimpleNamespace(cached_tokens=8),
+                ),
                 choices=[],
             ),
         ],
@@ -202,6 +223,10 @@ def test_openai_stream_to_response_reads_streamed_tool_calls():
     assert response.tool_calls[0].arguments == {"file_path": "/tmp/a.txt", "content": "hello"}
     assert response.prompt_tokens == 12
     assert response.completion_tokens == 34
+    assert response.prompt_cache_tokens == 7
+    assert response.completion_cache_tokens == 8
+    assert response.prompt_uncache_tokens == 5
+    assert response.completion_uncache_tokens == 26
     assert seen == ["do", "ne"]
 
 
@@ -213,7 +238,12 @@ def test_chat_openai_uses_streaming_requests(monkeypatch):
         captured.update(params)
         return [
             SimpleNamespace(
-                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+                usage=SimpleNamespace(
+                    prompt_tokens=1,
+                    completion_tokens=2,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+                    completion_tokens_details=SimpleNamespace(cached_tokens=4),
+                ),
                 choices=[SimpleNamespace(delta=SimpleNamespace(content="", tool_calls=[]))],
             )
         ]
@@ -226,6 +256,14 @@ def test_chat_openai_uses_streaming_requests(monkeypatch):
     assert captured["stream_options"] == {"include_usage": True}
     assert response.prompt_tokens == 1
     assert response.completion_tokens == 2
+    assert response.prompt_cache_tokens == 3
+    assert response.completion_cache_tokens == 4
+    assert response.prompt_uncache_tokens == 0
+    assert response.completion_uncache_tokens == 0
+    assert llm.total_prompt_cache_tokens == 3
+    assert llm.total_completion_cache_tokens == 4
+    assert llm.total_prompt_uncache_tokens == 0
+    assert llm.total_completion_uncache_tokens == 0
 
 
 def test_chat_openai_retries_without_stream_options_when_backend_rejects_it(monkeypatch):
@@ -238,7 +276,12 @@ def test_chat_openai_retries_without_stream_options_when_backend_rejects_it(monk
             raise TypeError("unsupported stream_options")
         return [
             SimpleNamespace(
-                usage=SimpleNamespace(prompt_tokens=1, completion_tokens=2),
+                usage=SimpleNamespace(
+                    prompt_tokens=1,
+                    completion_tokens=2,
+                    prompt_tokens_details=SimpleNamespace(cached_tokens=3),
+                    completion_tokens_details=SimpleNamespace(cached_tokens=4),
+                ),
                 choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", tool_calls=[]))],
             )
         ]
@@ -251,6 +294,10 @@ def test_chat_openai_retries_without_stream_options_when_backend_rejects_it(monk
     assert calls[0]["stream_options"] == {"include_usage": True}
     assert "stream_options" not in calls[1]
     assert response.content == "ok"
+    assert response.prompt_cache_tokens == 3
+    assert response.completion_cache_tokens == 4
+    assert response.prompt_uncache_tokens == 0
+    assert response.completion_uncache_tokens == 0
 
 
 def test_chat_anthropic_uses_streaming_requests(monkeypatch):
@@ -262,7 +309,12 @@ def test_chat_anthropic_uses_streaming_requests(monkeypatch):
             SimpleNamespace(type="text", text="hello world"),
             SimpleNamespace(type="tool_use", id="tool_1", name="read_file", input={"path": "a.txt"}),
         ],
-        usage=SimpleNamespace(input_tokens=11, output_tokens=22),
+        usage=SimpleNamespace(
+            input_tokens=11,
+            output_tokens=22,
+            cache_read_input_tokens=9,
+            cache_read_output_tokens=10,
+        ),
     )
 
     class FakeStream:
@@ -323,3 +375,11 @@ def test_chat_anthropic_uses_streaming_requests(monkeypatch):
     assert response.tool_calls[0].arguments == {"path": "a.txt"}
     assert response.prompt_tokens == 11
     assert response.completion_tokens == 22
+    assert response.prompt_cache_tokens == 9
+    assert response.completion_cache_tokens == 10
+    assert response.prompt_uncache_tokens == 2
+    assert response.completion_uncache_tokens == 12
+    assert llm.total_prompt_cache_tokens == 9
+    assert llm.total_completion_cache_tokens == 10
+    assert llm.total_prompt_uncache_tokens == 2
+    assert llm.total_completion_uncache_tokens == 12
