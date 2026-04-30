@@ -282,7 +282,7 @@ def main():
 
 def _run_once(agent: Agent, prompt: str):
     streamed: list[str] = []
-    assistant_stream = _MarkdownStreamRenderer(_emit_raw_terminal)
+    assistant_stream = _MarkdownStreamRenderer(_emit_raw_terminal, render=lambda text: text)
 
     def on_token(token):
         streamed.append(token)
@@ -1037,8 +1037,10 @@ class _MarkdownStreamRenderer:
         self._last_emit_at = current_time
 
     def finish(self) -> None:
-        if self._buffer and self._on_finish is not None:
-            self._on_finish()
+        if self._buffer:
+            self._render_current()
+            if self._on_finish is not None:
+                self._on_finish()
         self._reset()
 
     def _render_current(self) -> None:
