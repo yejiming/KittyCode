@@ -43,6 +43,7 @@ from kittycode.cli import (
     _render_startup_header,
     _repl,
     _resume_agent_session,
+    _run_once,
     _show_tool_call,
     _show_help,
     _style_startup_line,
@@ -1013,6 +1014,26 @@ def test_main_routes_prompt_to_run_once(monkeypatch):
     assert calls == ["logging", ("run_once", agent, "hello")]
 
 
+def test_run_once_streams_complete_markdown_chunks(monkeypatch):
+    emitted: list[str] = []
+
+    class FakeAgent:
+        on_brief_message = None
+        ask_user_handler = None
+
+        def chat(self, prompt, on_token=None, on_tool=None):
+            assert prompt == "hello"
+            on_token("```py\npri")
+            on_token("nt('x')\n```")
+            return "```py\nprint('x')\n```"
+
+    monkeypatch.setattr("kittycode.cli._emit_raw_terminal", emitted.append)
+
+    _run_once(FakeAgent(), "hello")
+
+    assert "".join(emitted) == "```py\nprint('x')\n```"
+
+
 def test_main_routes_interactive_runtime_to_repl(monkeypatch):
     args = SimpleNamespace(prompt=None, resume=None)
     config = Config(api_key="secret")
@@ -1363,6 +1384,25 @@ def test_markdown_stream_renderer_preserves_wrapped_text_without_rewind():
     assert emitted == ["123456789", "0"]
 
     writer.finish()
+
+
+def test_markdown_stream_renderer_flushes_throttled_tail_on_finish():
+    emitted: list[str] = []
+    clock = iter([0.0, 0.01])
+
+    writer = _MarkdownStreamRenderer(
+        emitted.append,
+        render=lambda text: text,
+        refresh_interval=10.0,
+        now=lambda: next(clock),
+        terminal_width=80,
+    )
+
+    writer.write("hello")
+    writer.write(" world")
+    writer.finish()
+
+    assert emitted == ["hello", " world"]
 
 
 def test_markdown_stream_renderer_no_duplicate_on_long_content():
