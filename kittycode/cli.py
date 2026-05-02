@@ -218,19 +218,7 @@ def _apply_cli_overrides(config: Config, args) -> Config:
 def _ensure_api_key(config: Config) -> None:
     if not config.api_key:
         console.print("[red bold]No API key found.[/]")
-        console.print(
-            f"Populate {CONFIG_PATH} with JSON such as:\n"
-            "\n"
-            "{\n"
-            '  "interface": "openai",\n'
-            '  "api_key": "sk-...",\n'
-            '  "model": "gpt-4o",\n'
-            '  "base_url": "https://api.openai.com/v1",\n'
-            '  "max_tokens": 4096,\n'
-            '  "temperature": 0,\n'
-            '  "max_context": 128000\n'
-            "}\n"
-        )
+        console.print("Please run kittycode --config to set up your API key.")
         sys.exit(1)
 
 

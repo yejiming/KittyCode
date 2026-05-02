@@ -36,6 +36,7 @@ from kittycode.cli import (
     _parse_question_answer,
     _parse_args,
     _default_history_path,
+    _ensure_api_key,
     _load_config,
     _render_brief_attachments,
     _render_markdown_to_plain_text,
@@ -978,6 +979,20 @@ def test_load_config_exits_with_validation_guidance(monkeypatch):
     assert any("Invalid config file" in line for line in printed)
     assert any("kittycode --config" in line for line in printed)
     assert any("models[0].model_name is required" in line for line in printed)
+
+
+def test_ensure_api_key_exits_with_config_guidance(monkeypatch):
+    printed = []
+
+    monkeypatch.setattr("kittycode.cli.console.print", lambda message="", *args, **kwargs: printed.append(str(message)))
+
+    with pytest.raises(SystemExit, match="1"):
+        _ensure_api_key(Config(api_key=""))
+
+    assert printed == [
+        "[red bold]No API key found.[/]",
+        "Please run kittycode --config to set up your API key.",
+    ]
 
 
 def test_parse_args_help_mentions_config_and_hides_runtime_override_flags(monkeypatch, capsys):

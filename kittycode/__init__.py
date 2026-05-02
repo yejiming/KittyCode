@@ -12,7 +12,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-__version__ = "0.4.0"
+__version__ = "1.0.0"
 
 from .config import Config
 from .llm import LLM
